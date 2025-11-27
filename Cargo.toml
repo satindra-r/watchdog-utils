@@ -3,6 +3,7 @@ name = "watchdog_utils_II"
 version = "0.1.0"
 edition = "2024"
 repository = "https://github.com/satindra-r/watchdog-utils"
+description = "Library for user management for scout and watchdog"
 license = "MIT"
 
 
