@@ -1,9 +1,9 @@
-use crate::config::{KeyhouseConf, get_log_target, set_log_target};
+use crate::config::{Config, get_log_target, init, set_log_target};
 use crate::models::commit_info::CommitInfo;
-use crate::models::github_content::GitHubContent;
 use crate::services::user_service::add_user_to_group;
 use crate::services::user_service::delete_user;
 use crate::services::user_service::remove_user_from_group;
+use crate::utils::cache_utils::{names_path, sync_full_cache, update_local_cache};
 use anyhow::{Result, anyhow};
 use log::{error, info, warn};
 use regex::Regex;
@@ -15,15 +15,20 @@ use std::fs;
 use std::path::Path;
 
 pub async fn process_update_request(
-    keyhouse_config: KeyhouseConf,
+    config: Config,
     update_log_target: &str,
-    hostname: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     set_log_target(update_log_target.to_string());
-    let base_url = keyhouse_config.base_url.clone();
-    let token = keyhouse_config.token.clone();
+
+    let _ = init(&config);
+
+    let base_url = &config.keyhouse.base_url;
+    let token = &config.keyhouse.token;
+    let hostname = &config.hostname;
+
     let mut should_update_all_users = false;
     let mut last_commit = String::new();
+
     if !Path::new("base_commit.txt").exists() {
         should_update_all_users = true;
     } else {
@@ -32,49 +37,125 @@ pub async fn process_update_request(
             should_update_all_users = true;
         }
     }
+
     if should_update_all_users {
-        info!(target:get_log_target(), "No valid last commit found, updating all users...");
-        let _ = update_all_users(&base_url, &token).await;
-        let latest_commit = fetch_latest_commit(&base_url, &token).await?;
-        fs::write("base_commit.txt", &latest_commit)?;
+        info!(target:get_log_target(), "No valid last commit found. Starting Full Sync...");
+        sync_full_cache(&config).await?;
+        update_all_users_from_cache(hostname, &config).await?;
+
+        match fetch_latest_commit(base_url, token).await {
+            Ok(latest_commit) => {
+                fs::write("base_commit.txt", &latest_commit)?;
+            }
+            Err(e) => {
+                warn!(target:get_log_target(), "Failed to fetch latest commit: {}. Using cache for updates.", e);
+                return Ok(());
+            }
+        }
         return Ok(());
     }
-    let merge_commit = fetch_recent_commit(&base_url, &token).await?;
-    let diff = fetch_diff(&base_url, &last_commit, &merge_commit, &token).await?;
-    info!(target:get_log_target(), "Fetched diff from GitHub");
-    for (cloud_provider, project, hash, status) in extract_diff_parts(&diff) {
+
+    // Try to fetch from GitHub, fall back to cache on auth failure
+    match fetch_recent_commit(base_url, token).await {
+        Ok(merge_commit) => match fetch_diff(base_url, &last_commit, &merge_commit, token).await {
+            Ok(diff) => {
+                info!(target:get_log_target(), "Fetched diff from GitHub");
+                process_diff(&diff, hostname, &config, &last_commit, &merge_commit).await?;
+                fs::write("base_commit.txt", &merge_commit)?;
+            }
+            Err(e) => {
+                warn!(target:get_log_target(), "Failed to fetch diff: {}. Updating from cache.", e);
+                update_all_users_from_cache(hostname, &config).await?;
+            }
+        },
+        Err(e) => {
+            warn!(target:get_log_target(), "Failed to fetch recent commit: {}. Updating from cache.", e);
+            update_all_users_from_cache(hostname, &config).await?;
+        }
+    }
+
+    info!(target:get_log_target(), "Update process completed.");
+    Ok(())
+}
+
+async fn process_diff(
+    diff: &str,
+    hostname: &str,
+    config: &Config,
+    last_commit: &str,
+    _merge_commit: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (cloud_provider, project, hash, status) in extract_diff_parts(diff) {
         info!(target:get_log_target(),
             "Parsed diff - Project: {}, Cloud Provider: {}, Hash: {}, Status: {}",
             project, cloud_provider, hash, status
         );
-        if let Some(decoded_str) =
-            fetch_and_decode_file(&base_url, &token, &hash, &status, &last_commit).await?
+
+        let mut content_for_cache: Option<String> = None;
+        let mut username_for_action: Option<String> = None;
+
+        if let Some(decoded_str) = fetch_and_decode_file(
+            &config.keyhouse.base_url,
+            &config.keyhouse.token,
+            &hash,
+            &status,
+            last_commit,
+        )
+        .await?
         {
             info!(target:get_log_target(), "Decoded file for hash {}", hash);
-            if cloud_provider != hostname {
-                info!(target:get_log_target(), "not this server, skipping...");
-                continue;
+            username_for_action = Some(decoded_str.clone());
+
+            if cloud_provider == "names" {
+                content_for_cache = Some(decoded_str);
+            } else {
+                content_for_cache = Some("1".to_string());
             }
-            if status == "added" {
-                info!(target:get_log_target(), "Adding user to group...");
-                add_user_to_group(&decoded_str, &project).unwrap_or_else(|e| {
-                    error!(target:get_log_target(), "Failed to add user to group: {}", e);
-                });
-            } else if status == "deleted" {
-                info!(target:get_log_target(), "Removing user from group...");
-                remove_user_from_group(&decoded_str, &project).unwrap_or_else(|e| {
-                    error!(target:get_log_target(), "Failed to remove user from group: {}", e);
-                });
-            } else if status == "deleteduser" {
-                info!(target:get_log_target(), "Deleting user...");
-                delete_user(&decoded_str).unwrap_or_else(|e| {
-                    error!(target:get_log_target(), "Failed to delete user: {}", e);
-                });
+        }
+
+        if let Some(username) = username_for_action {
+            if cloud_provider == hostname || status == "deleteduser" {
+                if status == "added" && cloud_provider != "names" {
+                    info!(target:get_log_target(), "Adding user '{}' to group '{}'...", username, project);
+                    add_user_to_group(&username, &project).unwrap_or_else(|e| {
+                        error!(target:get_log_target(), "Failed to add user: {}", e);
+                    });
+                } else if status == "deleted" && cloud_provider != "names" {
+                    info!(target:get_log_target(), "Removing user '{}' from group '{}'...", username, project);
+                    remove_user_from_group(&username, &project).unwrap_or_else(|e| {
+                        error!(target:get_log_target(), "Failed to remove user: {}", e);
+                    });
+                } else if status == "deleteduser" {
+                    info!(target:get_log_target(), "Deleting user '{}'...", username);
+                    delete_user(&username).unwrap_or_else(|e| {
+                        error!(target:get_log_target(), "Failed to delete user: {}", e);
+                    });
+                }
+            } else if cloud_provider != "names" {
+                info!(target:get_log_target(), "Change for server '{}', not this server. Skipping system action.", cloud_provider);
+            }
+
+            let (cache_provider, cache_project) = if cloud_provider == "names" {
+                ("names", "")
+            } else {
+                (cloud_provider.as_str(), project.as_str())
+            };
+
+            if let Some(content) = content_for_cache {
+                update_local_cache(
+                    config,
+                    cache_project,
+                    cache_provider,
+                    &hash,
+                    &status,
+                    &content,
+                )
+                .unwrap_or_else(
+                    |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
+                );
             }
         }
     }
-    info!(target:get_log_target(), "Processed diff successfully.");
-    std::fs::write("base_commit.txt", &merge_commit)?;
 
     Ok(())
 }
@@ -213,88 +294,56 @@ pub async fn fetch_diff(
     Ok(diff)
 }
 
-pub async fn update_all_users(
-    base_url: &str,
-    token: &str,
+/// This function iterates through a specific directory structure to reconstruct user-to-group mappings. It expects a cache structure where:
+/// 1.) `access/<server>/<group_name>/<user_hash>` exists to link groups to user hashes.
+/// 2.) `names/<user_hash>` exists and contains the plaintext username.
+pub async fn update_all_users_from_cache(
+    server: &str,
+    config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let client = reqwest::Client::new();
+    let cache_base_path = Path::new(&config.cache_path);
+    info!(target:get_log_target(), "Provisioning users based on full sync cache at {:?}...", cache_base_path);
 
-    let url = format!("{}/access?ref=build", base_url);
+    let access_path = cache_base_path.join("access").join(server);
 
-    let providers_resp = client
-        .get(&url)
-        .bearer_auth(token)
-        .header(USER_AGENT, "rust-webhook-server")
-        .header(ACCEPT, "application/vnd.github.v3+json")
-        .send()
-        .await?;
-
-    let providers: Vec<Value> = providers_resp.json().await?;
-    let mut cloud_providers = vec![];
-
-    for provider in &providers {
-        if let Some(name) = provider["name"].as_str() {
-            cloud_providers.push(name.to_string());
-        }
+    // Early exit if the cache for this server doesn't exist
+    if !access_path.exists() {
+        warn!(target:get_log_target(), "Access directory for this server '{}' not found in cache.", server);
+        return Ok(());
     }
 
-    for provider in cloud_providers {
-        let provider_url = format!("{}/access/{}?ref=build", base_url, provider);
+    // 1. Iterate over directories representing Groups
+    for group_entry in fs::read_dir(access_path)? {
+        let group_entry = group_entry?;
+        if group_entry.file_type()?.is_dir() {
+            let group_path = group_entry.path();
+            if let Some(group_name) = group_path.file_name().and_then(|n| n.to_str()) {
+                // 2. Iterate over files representing User Hashes
+                for hash_entry in fs::read_dir(&group_path)? {
+                    let hash_entry = hash_entry?;
+                    if hash_entry.file_type()?.is_file()
+                        && let Some(hash) = hash_entry.file_name().to_str()
+                    {
+                        let name_path = names_path(cache_base_path, hash);
 
-        let projects_resp = client
-            .get(&provider_url)
-            .bearer_auth(token)
-            .header(USER_AGENT, "rust-webhook-server")
-            .header(ACCEPT, "application/vnd.github.v3+json")
-            .send()
-            .await?;
+                        // 3. Resolve Hash -> Username
+                        if let Ok(username) = fs::read_to_string(name_path) {
+                            let trimmed_username = username.trim();
+                            if !trimmed_username.is_empty() {
+                                info!(target:get_log_target(), "Sync: Adding user '{}' to group '{}'", trimmed_username, group_name);
 
-        let projects: Vec<Value> = projects_resp.json().await?;
-
-        for project in &projects {
-            if let Some(project_name) = project["name"].as_str() {
-                let url = format!(
-                    "{}/access/{}/{}?ref=build",
-                    base_url, provider, project_name
-                );
-
-                let response = client
-                    .get(&url)
-                    .bearer_auth(token)
-                    .header(ACCEPT, "application/vnd.github.v3+json")
-                    .header(USER_AGENT, "rust-webhook-server")
-                    .send()
-                    .await?;
-
-                if response.status().is_success() {
-                    let files: Vec<GitHubContent> = response.json().await?;
-
-                    for file in files {
-                        let hash = &file.name;
-
-                        if let Some(decoded_str) =
-                            fetch_and_decode_file(base_url, token, hash, "added", "").await?
-                        {
-                            info!(target:get_log_target(),
-                                "Adding user to group for project {}: {}",
-                                project_name, decoded_str
-                            );
-                            add_user_to_group(&decoded_str, project_name).unwrap_or_else(|e| {
-                                error!(target:get_log_target(), "Failed to add user in update_all_users: {}", e);
-                            });
+                                // 4. Execute Provisioning
+                                add_user_to_group(trimmed_username, group_name).unwrap_or_else(
+                                        |e| error!(target:get_log_target(), "Failed to add user during sync: {}", e),
+                                    );
+                            }
                         }
                     }
-                } else {
-                    error!(target:get_log_target(),
-                        "Failed to fetch content for project {}. Status: {}",
-                        project_name,
-                        response.status()
-                    );
                 }
             }
         }
     }
-
+    info!(target:get_log_target(), "User provisioning completed.");
     Ok(())
 }
 
