@@ -1,15 +1,16 @@
 use anyhow::{Result, anyhow};
+use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-#[derive(Clone)]
+#[derive(Deserialize, Clone)]
 pub struct KeyhouseConf {
     pub base_url: String,
     pub token: String,
 }
 
-#[derive(Clone)]
+#[derive(Deserialize, Clone)]
 pub struct Config {
     pub hostname: String,
     pub keyhouse: KeyhouseConf,
