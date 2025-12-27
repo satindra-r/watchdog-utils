@@ -11,10 +11,10 @@ use reqwest::Client;
 use reqwest::header::{ACCEPT, USER_AGENT};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
+use std::{fs, io};
 
-pub async fn process_update_request(
+pub async fn process_full_update_request(
     config: Config,
     update_log_target: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -26,33 +26,60 @@ pub async fn process_update_request(
     let token = &config.keyhouse.token;
     let hostname = &config.hostname;
 
-    let mut should_update_all_users = false;
-    let mut last_commit = String::new();
+    info!(target:get_log_target(), "Starting Full Sync...");
+    sync_full_cache(&config).await?;
+    update_all_users_from_cache(hostname, &config).await?;
+
+    match fetch_latest_commit(base_url, token).await {
+        Ok(latest_commit) => {
+            fs::write("base_commit.txt", &latest_commit)?;
+        }
+        Err(e) => {
+            warn!(target:get_log_target(), "Failed to fetch latest commit: {}. Using cache for updates.", e);
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+pub async fn process_update_request(
+    config: Config,
+    update_log_target: &str,
+    allow_fallback: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    set_log_target(update_log_target.to_string());
+
+    let _ = init(&config);
+
+    let base_url = &config.keyhouse.base_url;
+    let token = &config.keyhouse.token;
+    let hostname = &config.hostname;
+
+    let last_commit;
 
     if !Path::new("base_commit.txt").exists() {
-        should_update_all_users = true;
+        error!(target:get_log_target(), "Last commit not found.");
+        return if allow_fallback {
+            process_full_update_request(config, update_log_target).await
+        } else {
+            Err(Box::new(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Last commit not found. Please provide a base_commit.txt or run with --all",
+            )))
+        };
     } else {
         last_commit = fs::read_to_string("base_commit.txt")?;
         if last_commit.trim().is_empty() {
-            should_update_all_users = true;
+            error!(target:get_log_target(), "Last commit is empty.");
+            return if allow_fallback {
+                process_full_update_request(config, update_log_target).await
+            } else {
+                Err(Box::new(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Last commit is empty. Please provide a valid base_commit.txt or run with --all",
+                )))
+            };
         }
-    }
-
-    if should_update_all_users {
-        info!(target:get_log_target(), "No valid last commit found. Starting Full Sync...");
-        sync_full_cache(&config).await?;
-        update_all_users_from_cache(hostname, &config).await?;
-
-        match fetch_latest_commit(base_url, token).await {
-            Ok(latest_commit) => {
-                fs::write("base_commit.txt", &latest_commit)?;
-            }
-            Err(e) => {
-                warn!(target:get_log_target(), "Failed to fetch latest commit: {}. Using cache for updates.", e);
-                return Ok(());
-            }
-        }
-        return Ok(());
     }
 
     // Try to fetch from GitHub, fall back to cache on auth failure
