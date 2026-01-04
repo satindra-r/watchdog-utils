@@ -361,8 +361,8 @@ pub async fn update_all_users_from_cache(
 
                                 // 4. Execute Provisioning
                                 add_user_to_group(trimmed_username, group_name).unwrap_or_else(
-                                        |e| error!(target:get_log_target(), "Failed to add user during sync: {}", e),
-                                    );
+                                    |e| error!(target:get_log_target(), "Failed to add user during sync: {}", e),
+                                );
                             }
                         }
                     }
@@ -398,5 +398,253 @@ pub async fn fetch_latest_commit(base_url: &str, token: &str) -> Result<String> 
         Ok(sha.to_string())
     } else {
         Err(anyhow!("SHA not found in commit response"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::test_init;
+    use crate::services::github_service;
+    use reqwest::Client;
+    use reqwest::header::{ACCEPT, USER_AGENT};
+    use std::collections::HashSet;
+
+    #[test]
+    fn fetch_data_test() {
+        let config = test_init();
+        let client = Client::new();
+        let clean_base = "https://api.github.com/repos/watchdog-test-org/test";
+        let base = "14dc1a625a40dd1effc5e3aa96d5b899efa40a35";
+        let merge = "715a387763b7565f2215f70cea02cbd35ed8a2bd";
+        let url = format!("{}/compare/{}...{}", clean_base, base, merge);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let response = client
+                .get(&url)
+                .header(USER_AGENT, "rust-webhook-server")
+                .header(ACCEPT, "application/vnd.github.v3.diff")
+                .bearer_auth(config.keyhouse.token.as_str())
+                .send()
+                .await
+                .unwrap();
+            let diff = response.text().await.unwrap();
+            println!(">{}<", diff);
+        });
+    }
+
+    #[test]
+    fn extract_diff_parts_add_grp_test() {
+        let diff = r#"diff --git a/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef b/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+new file mode 100644
+index 0000000..56a6051
+--- /dev/null
++++ b/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+@@ -0,0 +1 @@
++1
+\ No newline at end of file
+"#;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected = (
+                "centos".to_string(),
+                "proxy".to_string(),
+                "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
+                "added".to_string(),
+            );
+            let result = github_service::extract_diff_parts(diff);
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0], expected);
+            println!("extract_diff_parts add group passed");
+        });
+    }
+
+    #[test]
+    fn extract_diff_parts_del_grp_test() {
+        let diff = r#"diff --git a/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef b/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+deleted file mode 100644
+index 56a6051..0000000
+--- a/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
++++ /dev/null
+@@ -1 +0,0 @@
+-1
+\ No newline at end of file
+"#;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected = (
+                "centos".to_string(),
+                "proxy".to_string(),
+                "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
+                "deleted".to_string(),
+            );
+            let result = github_service::extract_diff_parts(diff);
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0], expected);
+            println!("extract_diff_parts delete group passed");
+        });
+    }
+
+    #[test]
+    fn extract_diff_parts_multi_add_grp_test() {
+        let diff = r#"diff --git a/access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef b/access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+new file mode 100644
+index 0000000..56a6051
+--- /dev/null
++++ b/access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+@@ -0,0 +1 @@
++1
+\ No newline at end of file
+diff --git a/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef b/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+new file mode 100644
+index 0000000..56a6051
+--- /dev/null
++++ b/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+@@ -0,0 +1 @@
++1
+\ No newline at end of file
+"#;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected: HashSet<(String, String, String, String)> = HashSet::from_iter([
+                (
+                    "centos".to_string(),
+                    "proxy".to_string(),
+                    "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
+                    "added".to_string(),
+                ),
+                (
+                    "centos".to_string(),
+                    "broker".to_string(),
+                    "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
+                    "added".to_string(),
+                ),
+            ]);
+            let result = github_service::extract_diff_parts(diff);
+            let result_set = HashSet::from_iter(result);
+            assert_eq!(result_set, expected);
+            println!("extract_diff_parts multiple add group passed");
+        });
+    }
+    #[test]
+    fn extract_diff_parts_multi_del_grp_test() {
+        let diff = r#"diff --git a/access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef b/access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+deleted file mode 100644
+index 56a6051..0000000
+--- a/access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
++++ /dev/null
+@@ -1 +0,0 @@
+-1
+\ No newline at end of file
+diff --git a/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef b/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+deleted file mode 100644
+index 56a6051..0000000
+--- a/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
++++ /dev/null
+@@ -1 +0,0 @@
+-1
+\ No newline at end of file
+"#;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected: HashSet<(String, String, String, String)> = HashSet::from_iter([
+                (
+                    "centos".to_string(),
+                    "proxy".to_string(),
+                    "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
+                    "deleted".to_string(),
+                ),
+                (
+                    "centos".to_string(),
+                    "broker".to_string(),
+                    "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
+                    "deleted".to_string(),
+                ),
+            ]);
+            let result = github_service::extract_diff_parts(diff);
+            let result_set = HashSet::from_iter(result);
+            assert_eq!(result_set, expected);
+            println!("extract_diff_parts multiple delete group passed");
+        });
+    }
+
+    #[test]
+    fn extract_diff_parts_add_del_grp_test() {
+        let diff = r#"diff --git a/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef b/access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+similarity index 100%
+rename from access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+rename to access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+"#;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected: HashSet<(String, String, String, String)> = HashSet::from_iter([
+                (
+                    "centos".to_string(),
+                    "proxy".to_string(),
+                    "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
+                    "deleted".to_string(),
+                ),
+                (
+                    "centos".to_string(),
+                    "broker".to_string(),
+                    "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
+                    "added".to_string(),
+                ),
+            ]);
+            let result = github_service::extract_diff_parts(diff);
+            let result_set = HashSet::from_iter(result);
+            assert_eq!(result_set, expected);
+            println!("extract_diff_parts add and delete group passed");
+        });
+    }
+
+    #[test]
+    fn extract_diff_parts_add_user_test() {
+        let diff = r#"diff --git a/names/8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0 b/names/8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0
+new file mode 100644
+index 0000000..b6955e2
+--- /dev/null
++++ b/names/8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0
+@@ -0,0 +1 @@
++uranus
+\ No newline at end of file
+"#;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected = (
+                "".to_string(),
+                "names".to_string(),
+                "8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0".to_string(),
+                "modifieduser".to_string(),
+            );
+            let result = github_service::extract_diff_parts(diff);
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0], expected);
+            println!("extract_diff_parts add user passed");
+        });
+    }
+
+    #[test]
+    fn extract_diff_parts_del_user_test() {
+        let diff = r#"diff --git a/names/8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0 b/names/8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0
+deleted file mode 100644
+index b6955e2..0000000
+--- a/names/8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0
++++ /dev/null
+@@ -1 +0,0 @@
+-uranus
+\ No newline at end of file"#;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected = (
+                "".to_string(),
+                "names".to_string(),
+                "8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0".to_string(),
+                "deleteduser".to_string(),
+            );
+            let result = github_service::extract_diff_parts(diff);
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0], expected);
+            println!("extract_diff_parts delete user passed");
+        });
     }
 }
