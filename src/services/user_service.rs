@@ -167,7 +167,10 @@ done
 
 #[cfg(test)]
 mod tests {
-    use crate::services::user_service::{create_user, delete_user};
+    use crate::services::user_service::{
+        add_user_to_group, create_user, delete_user, group_exists, remove_user_from_group,
+        user_exists,
+    };
     use std::process::Command;
 
     #[test]
@@ -175,20 +178,12 @@ mod tests {
     pub fn create_user_docker_test() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let output_prev = Command::new("id")
-                .arg("testUserCreate")
-                .output()
-                .expect("id can't be run");
             assert!(
-                !output_prev.status.success(),
-                "\"testUserCreate\" already exists can't proceed with test"
+                !user_exists("testUserCreate").unwrap(),
+                "\"testUserCreate\" already exists, can't proceed with test"
             );
             create_user("testUserCreate").expect("can't create user");
-            let output_next = Command::new("id")
-                .arg("testUserCreate")
-                .output()
-                .expect("id can't be run");
-            assert!(output_next.status.success());
+            assert!(user_exists("testUserCreate").unwrap());
         });
     }
 
@@ -198,20 +193,89 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             create_user("testUserDelete").expect("can't create user");
-            let output_prev = Command::new("id")
-                .arg("testUserDelete")
-                .output()
-                .expect("id can't be run");
             assert!(
-                output_prev.status.success(),
-                "unable to create \"testUserDelete\" can't proceed with test"
+                user_exists("testUserDelete").unwrap(),
+                "unable to create \"testUserDelete\", can't proceed with test"
             );
             delete_user("testUserDelete").expect("can't delete user");
-            let output_next = Command::new("id")
-                .arg("testUserDelete")
-                .output()
-                .expect("id can't be run");
-            assert!(!output_next.status.success());
+
+            assert!(!user_exists("testUserDelete").unwrap());
+        });
+    }
+
+    #[test]
+    #[ignore]
+    pub fn add_user_to_group_docker_test() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            create_user("testUserGroupAdd").expect("can't create user");
+            assert!(
+                user_exists("testUserGroupAdd").unwrap(),
+                "unable to create \"testUserGroupAdd\" can't proceed with test"
+            );
+            assert!(
+                group_exists("sudo"),
+                "\"sudo\" group doesn't exit, can't proceed with test"
+            );
+
+            let output_before = String::from_utf8(
+                Command::new("groups")
+                    .arg("testUserGroupAdd")
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+                .unwrap();
+            assert!(!output_before.contains("sudo"));
+
+            add_user_to_group("testUserGroupAdd", "sudo").expect("can't add user to group");
+            let output_after = String::from_utf8(
+                Command::new("groups")
+                    .arg("testUserGroupAdd")
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap();
+            assert!(output_after.contains("sudo"));
+        });
+    }
+
+    #[test]
+    #[ignore]
+    pub fn remove_user_from_group_docker_test() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            create_user("testUserGroupRem").expect("can't create user");
+            assert!(
+                user_exists("testUserGroupRem").unwrap(),
+                "unable to create \"testUserGroupRem\" can't proceed with test"
+            );
+            assert!(
+                group_exists("sudo"),
+                "\"sudo\" group doesn't exit, can't proceed with test"
+            );
+            add_user_to_group("testUserGroupRem", "sudo").expect("can't add user to group");
+            let output_before = String::from_utf8(
+                Command::new("groups")
+                    .arg("testUserGroupRem")
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap();
+            assert!(output_before.contains("sudo"));
+            remove_user_from_group("testUserGroupRem", "sudo")
+                .expect("can't remove user from group");
+            let output_after = String::from_utf8(
+                Command::new("groups")
+                    .arg("testUserGroupRem")
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap();
+            assert!(!output_after.contains("sudo"));
         });
     }
 }
