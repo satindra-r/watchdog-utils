@@ -49,7 +49,7 @@ jobs:
         run: docker build -t user-tests .
 
       - name: Run tests in container
-        run: docker run --rm user-tests cargo test docker --verbose --include-ignored
+        run: docker run --rm user-tests cargo test docker --verbose -- --include-ignored
 
   udeps:
     name: Unused Dependencies (cargo-udeps)
