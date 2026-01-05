@@ -39,6 +39,18 @@ jobs:
       - name: Run Tests
         run: cargo test --verbose
 
+  docker_tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t user-tests .
+
+      - name: Run tests in container
+        run: docker run --rm user-tests cargo test docker --verbose --include-ignored
+
   udeps:
     name: Unused Dependencies (cargo-udeps)
     runs-on: ubuntu-latest

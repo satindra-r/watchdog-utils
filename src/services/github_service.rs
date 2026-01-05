@@ -454,7 +454,6 @@ index 0000000..56a6051
             let result = github_service::extract_diff_parts(diff);
             assert_eq!(result.len(), 1);
             assert_eq!(result[0], expected);
-            println!("extract_diff_parts add group passed");
         });
     }
 
@@ -480,7 +479,6 @@ index 56a6051..0000000
             let result = github_service::extract_diff_parts(diff);
             assert_eq!(result.len(), 1);
             assert_eq!(result[0], expected);
-            println!("extract_diff_parts delete group passed");
         });
     }
 
@@ -522,7 +520,6 @@ index 0000000..56a6051
             let result = github_service::extract_diff_parts(diff);
             let result_set = HashSet::from_iter(result);
             assert_eq!(result_set, expected);
-            println!("extract_diff_parts multiple add group passed");
         });
     }
     #[test]
@@ -563,7 +560,6 @@ index 56a6051..0000000
             let result = github_service::extract_diff_parts(diff);
             let result_set = HashSet::from_iter(result);
             assert_eq!(result_set, expected);
-            println!("extract_diff_parts multiple delete group passed");
         });
     }
 
@@ -593,7 +589,6 @@ rename to access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3
             let result = github_service::extract_diff_parts(diff);
             let result_set = HashSet::from_iter(result);
             assert_eq!(result_set, expected);
-            println!("extract_diff_parts add and delete group passed");
         });
     }
 
@@ -619,7 +614,6 @@ index 0000000..b6955e2
             let result = github_service::extract_diff_parts(diff);
             assert_eq!(result.len(), 1);
             assert_eq!(result[0], expected);
-            println!("extract_diff_parts add user passed");
         });
     }
 
@@ -644,7 +638,6 @@ index b6955e2..0000000
             let result = github_service::extract_diff_parts(diff);
             assert_eq!(result.len(), 1);
             assert_eq!(result[0], expected);
-            println!("extract_diff_parts delete user passed");
         });
     }
 }

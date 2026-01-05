@@ -164,3 +164,54 @@ done
     info!(target:get_log_target(), "Appended group-config loader to '{}'.", bashrc_path);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::services::user_service::{create_user, delete_user};
+    use std::process::Command;
+
+    #[test]
+    #[ignore]
+    pub fn create_user_docker_test() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let output_prev = Command::new("id")
+                .arg("testUserCreate")
+                .output()
+                .expect("id can't be run");
+            assert!(
+                !output_prev.status.success(),
+                "\"testUserCreate\" already exists can't proceed with test"
+            );
+            create_user("testUserCreate").expect("can't create user");
+            let output_next = Command::new("id")
+                .arg("testUserCreate")
+                .output()
+                .expect("id can't be run");
+            assert!(output_next.status.success());
+        });
+    }
+
+    #[test]
+    #[ignore]
+    pub fn delete_user_docker_test() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            create_user("testUserDelete").expect("can't create user");
+            let output_prev = Command::new("id")
+                .arg("testUserDelete")
+                .output()
+                .expect("id can't be run");
+            assert!(
+                output_prev.status.success(),
+                "unable to create \"testUserDelete\" can't proceed with test"
+            );
+            delete_user("testUserDelete").expect("can't delete user");
+            let output_next = Command::new("id")
+                .arg("testUserDelete")
+                .output()
+                .expect("id can't be run");
+            assert!(!output_next.status.success());
+        });
+    }
+}
