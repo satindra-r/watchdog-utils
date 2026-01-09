@@ -403,34 +403,8 @@ pub async fn fetch_latest_commit(base_url: &str, token: &str) -> Result<String> 
 
 #[cfg(test)]
 mod tests {
-    use crate::config::test_init;
     use crate::services::github_service;
-    use reqwest::Client;
-    use reqwest::header::{ACCEPT, USER_AGENT};
     use std::collections::HashSet;
-
-    #[test]
-    fn fetch_data_test() {
-        let config = test_init();
-        let client = Client::new();
-        let clean_base = "https://api.github.com/repos/watchdog-test-org/test";
-        let base = "14dc1a625a40dd1effc5e3aa96d5b899efa40a35";
-        let merge = "715a387763b7565f2215f70cea02cbd35ed8a2bd";
-        let url = format!("{}/compare/{}...{}", clean_base, base, merge);
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let response = client
-                .get(&url)
-                .header(USER_AGENT, "rust-webhook-server")
-                .header(ACCEPT, "application/vnd.github.v3.diff")
-                .bearer_auth(config.keyhouse.token.as_str())
-                .send()
-                .await
-                .unwrap();
-            let diff = response.text().await.unwrap();
-            println!(">{}<", diff);
-        });
-    }
 
     #[test]
     fn extract_diff_parts_add_grp_test() {

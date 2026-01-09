@@ -57,17 +57,17 @@ pub fn init(config: &Config) -> Result<()> {
     Ok(())
 }
 
-pub fn test_init() -> Config {
+pub fn test_init(cache: &str) -> Config {
     dotenvy::dotenv().ok();
     let test_keyhouse = KeyhouseConf {
-        base_url: "https://api.github.com/repos/watchdog-test-org/test".to_string(),
+        base_url: "https://api.github.com/repos/satindra-r/watchdog-utils".to_string(),
         token: std::env::var("token").expect("token not found in .env"),
     };
 
     Config {
         hostname: "centos".to_string(),
         keyhouse: test_keyhouse,
-        cache_path: PathBuf::from("./cache"),
+        cache_path: PathBuf::from(cache),
         branch: "build".to_string(),
     }
 }
