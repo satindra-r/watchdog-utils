@@ -84,7 +84,7 @@ pub fn update_local_cache(
         access_path(&cache_base_path, first_child_directory, project, hash)
     };
 
-    if status == "added" || status == "modified" {
+    if status == "added" || status == "modified" || status == "modifieduser" {
         if let Some(parent) = cache_file_path.parent() {
             fs::create_dir_all(parent)?;
         }
