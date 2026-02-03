@@ -250,7 +250,7 @@ mod tests {
             assert_eq!(fs::read_dir(&config.cache_path.join("access/pa-002")).unwrap().count(), 1);
             assert_eq!(fs::read_dir(&config.cache_path.join("access/pa-002/quizio")).unwrap().count(), 1);
 
-            update_local_cache(&config, "", "names", "hash", "addeduser", "username").unwrap();
+            update_local_cache(&config, "", "names", "hash", "modifieduser", "username").unwrap();
 
             let contents1_after = fs::read_to_string(config.cache_path.join("access/centos/centos/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"));
             assert!(contents1_after.is_ok());
@@ -294,7 +294,7 @@ mod tests {
         rt.block_on(async {
             let _ = sync_full_cache(&config).await;
 
-            update_local_cache(&config, "", "names", "hash", "added", "username").unwrap();
+            update_local_cache(&config, "", "names", "hash", "modifieduser", "username").unwrap();
 
             let contents1_before = fs::read_to_string(config.cache_path.join("access/centos/centos/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"));
             assert!(contents1_before.is_ok());
@@ -368,7 +368,7 @@ mod tests {
         rt.block_on(async {
             let _ = sync_full_cache(&config).await;
 
-            update_local_cache(&config, "", "names", "hash", "added", "username").unwrap();
+            update_local_cache(&config, "", "names", "hash", "modifieduser", "username").unwrap();
 
             let contents1_before = fs::read_to_string(config.cache_path.join("access/centos/centos/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"));
             assert!(contents1_before.is_ok());
@@ -448,7 +448,7 @@ mod tests {
         rt.block_on(async {
             let _ = sync_full_cache(&config).await;
 
-            update_local_cache(&config, "", "names", "hash", "added", "username").unwrap();
+            update_local_cache(&config, "", "names", "hash", "modifieduser", "username").unwrap();
 
             let contents1_before = fs::read_to_string(config.cache_path.join("access/centos/centos/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"));
             assert!(contents1_before.is_ok());
@@ -529,7 +529,7 @@ mod tests {
         rt.block_on(async {
             let _ = sync_full_cache(&config).await;
 
-            update_local_cache(&config, "", "names", "hash", "added", "username").unwrap();
+            update_local_cache(&config, "", "names", "hash", "modifieduser", "username").unwrap();
             update_local_cache(&config, "sudo", "centos", "hash", "added", "username").unwrap();
 
             let contents1_before = fs::read_to_string(config.cache_path.join("access/centos/centos/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"));
