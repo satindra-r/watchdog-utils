@@ -179,10 +179,10 @@ mod tests {
 
     #[test]
     fn sync_full_cache_test() {
-        let config = test_init("./sync_full_cache_test");
+        let config = test_init("./cache_tests/sync_full_cache_test");
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let _ = sync_full_cache(&config).await;
+            sync_full_cache(&config).await.unwrap();
 
             let contents1 = fs::read_to_string(config.cache_path.join("access/centos/centos/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"));
             assert!(contents1.is_ok());
@@ -217,10 +217,10 @@ mod tests {
 
     #[test]
     fn update_local_cache_add_user_test() {
-        let config = test_init("./update_local_cache_add_user_test");
+        let config = test_init("./cache_tests/update_local_cache_add_user_test");
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let _ = sync_full_cache(&config).await;
+            sync_full_cache(&config).await.unwrap();
 
             let contents1_before = fs::read_to_string(config.cache_path.join("access/centos/centos/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"));
             assert!(contents1_before.is_ok());
@@ -289,10 +289,10 @@ mod tests {
 
     #[test]
     fn update_local_cache_delete_user_test() {
-        let config = test_init("./update_local_cache_delete_user_test");
+        let config = test_init("./cache_tests/update_local_cache_delete_user_test");
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let _ = sync_full_cache(&config).await;
+            sync_full_cache(&config).await.unwrap();
 
             update_local_cache(&config, "", "names", "hash", "modifieduser", "username").unwrap();
 
@@ -363,10 +363,10 @@ mod tests {
 
     #[test]
     fn update_local_cache_add_group_test() {
-        let config = test_init("./update_local_cache_add_group_test");
+        let config = test_init("./cache_tests/update_local_cache_add_group_test");
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let _ = sync_full_cache(&config).await;
+            sync_full_cache(&config).await.unwrap();
 
             update_local_cache(&config, "", "names", "hash", "modifieduser", "username").unwrap();
 
@@ -443,10 +443,10 @@ mod tests {
 
     #[test]
     fn update_local_cache_add_new_group_test() {
-        let config = test_init("./update_local_cache_add_new_group_test");
+        let config = test_init("./cache_tests/update_local_cache_add_new_group_test");
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let _ = sync_full_cache(&config).await;
+            sync_full_cache(&config).await.unwrap();
 
             update_local_cache(&config, "", "names", "hash", "modifieduser", "username").unwrap();
 
@@ -524,10 +524,10 @@ mod tests {
 
     #[test]
     fn update_local_cache_del_group_test() {
-        let config = test_init("./update_local_cache_del_group_test");
+        let config = test_init("./cache_tests/update_local_cache_del_group_test");
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let _ = sync_full_cache(&config).await;
+            sync_full_cache(&config).await.unwrap();
 
             update_local_cache(&config, "", "names", "hash", "modifieduser", "username").unwrap();
             update_local_cache(&config, "sudo", "centos", "hash", "added", "username").unwrap();
