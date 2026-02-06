@@ -120,7 +120,6 @@ async fn process_diff(
 
         let mut content_for_cache: Option<String> = None;
         let mut username_for_action: Option<String> = None;
-
         if let Some(decoded_str) = fetch_and_decode_file(
             &config.keyhouse.base_url,
             &config.keyhouse.token,
@@ -192,8 +191,7 @@ pub async fn fetch_recent_commit(
 ) -> Result<String, Box<dyn std::error::Error>> {
     let client = reqwest::Client::new();
 
-    let clean_base: &str = base_url.trim_end_matches("/contents");
-    let url = format!("{}/commits?sha=build&per_page=1", clean_base);
+    let url = format!("{}/commits?sha=build&per_page=1", base_url);
     let commits: Vec<CommitInfo> = client
         .get(&url)
         .bearer_auth(token)
@@ -225,7 +223,7 @@ pub async fn fetch_and_decode_file(
         "build"
     };
 
-    let url = format!("{}/names/{}?ref={}", base_url, hash, commit_ref);
+    let url = format!("{}/contents/names/{}?ref={}", base_url, hash, commit_ref);
     let client = reqwest::Client::new();
     let file_resp = client
         .get(&url)
@@ -236,8 +234,8 @@ pub async fn fetch_and_decode_file(
         .await?;
     if !file_resp.status().is_success() {
         warn!(target:get_log_target(),
-            "GitHub API returned error for file at hash {}: {}",
-            hash,
+            "GitHub API returned error for file at url {}: {}",
+            url,
             file_resp.status()
         );
         return Ok(None);
@@ -304,8 +302,7 @@ pub async fn fetch_diff(
     token: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let client = reqwest::Client::new();
-    let clean_base: &str = base_url.trim_end_matches("/contents");
-    let url = format!("{}/compare/{}...{}", clean_base, base, merge);
+    let url = format!("{}/compare/{}...{}", base_url, base, merge);
 
     info!(target:get_log_target(), "Fetching diff from GitHub: {}", url);
     let response = client
@@ -375,8 +372,7 @@ pub async fn update_all_users_from_cache(
 }
 
 pub async fn fetch_latest_commit(base_url: &str, token: &str) -> Result<String> {
-    let clean_base: &str = base_url.trim_end_matches("/contents");
-    let url = format!("{}/commits/build", clean_base);
+    let url = format!("{}/commits/build", base_url);
 
     let client = Client::new();
     let response = client
