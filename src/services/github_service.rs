@@ -253,41 +253,111 @@ pub async fn fetch_and_decode_file(
     }
 }
 pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, String)> {
-    let re_access = Regex::new(r"diff --git a/(access/([^/]+)/([^/]+)/([\w\d]+))").unwrap();
-    let re_names = Regex::new(r"diff --git a/(names/([\w\d]+))").unwrap();
+    let re_access = Regex::new(
+        r"diff --git a/access/([^/]+)/([^/]+)/([\w\d]+) b/access/([^/]+)/([^/]+)/([\w\d]+)",
+    )
+    .unwrap();
+    let re_names = Regex::new(r"diff --git a/names/([\w\d]+) b/names/([\w\d]+)").unwrap();
     let mut parts_with_status = HashMap::new();
-    for line in diff_data.lines() {
+    let mut diff_data_lines = diff_data.lines().peekable();
+    while let Some(line) = diff_data_lines.next() {
+        let next_line = diff_data_lines.peek().unwrap_or(&"");
         if let Some(caps) = re_access.captures(line) {
-            let full_path = &caps[1];
-            let project = &caps[2];
-            let provider = &caps[3];
-            let hash = &caps[4];
-            let status = if diff_data.contains("new file mode") && line.contains(full_path) {
-                "added"
-            } else if diff_data.contains("deleted file mode") && line.contains(full_path) {
-                "deleted"
+            let project1 = &caps[1];
+            let provider1 = &caps[2];
+            let hash1 = &caps[3];
+            let project2 = &caps[4];
+            let provider2 = &caps[5];
+            let hash2 = &caps[6];
+
+            if next_line.contains("new file mode") {
+                parts_with_status
+                    .entry((
+                        project1.to_string(),
+                        provider1.to_string(),
+                        hash1.to_string(),
+                    ))
+                    .or_insert("added".to_string());
+                info!(target:get_log_target(),
+                    "Access file change detected: {}/{}/{}, status: {}",
+                    project1, provider1, hash1, "added"
+                );
+            } else if next_line.contains("deleted file mode") {
+                parts_with_status
+                    .entry((
+                        project1.to_string(),
+                        provider1.to_string(),
+                        hash1.to_string(),
+                    ))
+                    .or_insert("deleted".to_string());
+                info!(target:get_log_target(),
+                    "Access file change detected: {}/{}/{}, status: {}",
+                    project1, provider1, hash1, "deleted"
+                );
+            } else if next_line.contains("similarity index 100%") {
+                parts_with_status
+                    .entry((
+                        project1.to_string(),
+                        provider1.to_string(),
+                        hash1.to_string(),
+                    ))
+                    .or_insert("deleted".to_string());
+                parts_with_status
+                    .entry((
+                        project2.to_string(),
+                        provider2.to_string(),
+                        hash2.to_string(),
+                    ))
+                    .or_insert("added".to_string());
+                info!(target:get_log_target(),
+                    "Access file change detected: {}/{}/{}, status: {}",
+                    project1, provider1, hash1, "deleted"
+                );
+                info!(target:get_log_target(),
+                    "Access file change detected: {}/{}/{}, status: {}",
+                    project2, provider2, hash2, "added"
+                );
             } else {
-                "modified"
-            };
-            info!(target:get_log_target(),
-                "Access file change detected: {}/{}/{}, status: {}",
-                project, provider, hash, status
-            );
-            parts_with_status
-                .entry((project.to_string(), provider.to_string(), hash.to_string()))
-                .or_insert(status.to_string());
+                parts_with_status
+                    .entry((
+                        project1.to_string(),
+                        provider1.to_string(),
+                        hash1.to_string(),
+                    ))
+                    .or_insert("modified".to_string());
+                info!(target:get_log_target(),
+                    "Access file change detected: {}/{}/{}, status: {}",
+                    project1, provider1, hash1, "modified"
+                );
+            }
         } else if let Some(caps) = re_names.captures(line) {
-            let full_path = &caps[1];
-            let hash = &caps[2];
-            let status = if diff_data.contains("deleted file mode") && line.contains(full_path) {
-                "deleteduser"
+            let hash1 = &caps[1];
+            let hash2 = &caps[2];
+            if next_line.contains("new file mode") {
+                parts_with_status
+                    .entry(("".to_string(), "names".to_string(), hash1.to_string()))
+                    .or_insert("addeduser".to_string());
+                info!(target:get_log_target(), "Name file change detected: {}, status: {}", hash1, "addeduser");
+            } else if next_line.contains("deleted file mode") {
+                parts_with_status
+                    .entry(("".to_string(), "names".to_string(), hash1.to_string()))
+                    .or_insert("deleteduser".to_string());
+                info!(target:get_log_target(), "Name file change detected: {}, status: {}", hash1, "deleteduser");
+            } else if next_line.contains("similarity index 100%") {
+                parts_with_status
+                    .entry(("".to_string(), "names".to_string(), hash1.to_string()))
+                    .or_insert("deleteduser".to_string());
+                parts_with_status
+                    .entry(("".to_string(), "names".to_string(), hash2.to_string()))
+                    .or_insert("addeduser".to_string());
+                info!(target:get_log_target(), "Name file change detected: {}, status: {}", hash1, "deleteduser");
+                info!(target:get_log_target(), "Name file change detected: {}, status: {}", hash2, "addeduser");
             } else {
-                "modifieduser"
+                parts_with_status
+                    .entry(("".to_string(), "names".to_string(), hash1.to_string()))
+                    .or_insert("modifieduser".to_string());
+                info!(target:get_log_target(), "Name file change detected: {}, status: {}", hash1, "modifieduser");
             };
-            info!(target:get_log_target(), "Name file change detected: {}, status: {}", hash, status);
-            parts_with_status
-                .entry(("".to_string(), "names".to_string(), hash.to_string()))
-                .or_insert(status.to_string());
         }
     }
     parts_with_status
@@ -358,8 +428,8 @@ pub async fn update_all_users_from_cache(
 
                                 // 4. Execute Provisioning
                                 add_user_to_group(trimmed_username, group_name).unwrap_or_else(
-                                        |e| error!(target:get_log_target(), "Failed to add user during sync: {}", e),
-                                    );
+                                    |e| error!(target:get_log_target(), "Failed to add user during sync: {}", e),
+                                );
                             }
                         }
                     }
