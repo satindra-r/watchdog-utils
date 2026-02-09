@@ -27,6 +27,8 @@ pub fn create_user(user: &str) -> io::Result<()> {
     let output = Command::new("sudo")
         .arg("useradd")
         .arg("-M")
+        .arg("-s")
+        .arg("/bin/bash")
         .arg(user)
         .output()?;
 
