@@ -182,7 +182,7 @@ pub async fn fetch_recent_commit(
     let commits: Vec<CommitInfo> = client
         .get(&url)
         .bearer_auth(token)
-        .header(USER_AGENT, "rust-webhook-server")
+        .header(USER_AGENT, "Watchdog Utils")
         .header(ACCEPT, "application/vnd.github.v3+json")
         .send()
         .await?
@@ -214,7 +214,7 @@ pub async fn fetch_and_decode_file(
     let file_resp = client
         .get(&url)
         .bearer_auth(token)
-        .header(USER_AGENT, "rust-webhook-server")
+        .header(USER_AGENT, "Watchdog Utils")
         .header(ACCEPT, "application/vnd.github.v3+json")
         .send()
         .await?;
@@ -357,7 +357,7 @@ pub async fn fetch_diff(
     info!(target:get_log_target(), "Fetching diff from GitHub: {}", url);
     let response = client
         .get(&url)
-        .header(USER_AGENT, "rust-webhook-server")
+        .header(USER_AGENT, "Watchdog Utils")
         .header(ACCEPT, "application/vnd.github.v3.diff")
         .bearer_auth(token)
         .send()
@@ -447,12 +447,71 @@ pub async fn fetch_latest_commit(base_url: &str, token: &str) -> Result<String> 
     }
 }
 
+pub async fn get_users_projects(
+    config: &Config,
+    userhash: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+
+    let host_url = format!(
+        "{}/contents/access/{}?ref=build",
+        config.keyhouse.base_url, config.hostname
+    );
+    info!(target:get_log_target(), "Host URL: {}", host_url);
+
+    let projects: Vec<String> = match client
+        .get(&host_url)
+        .header(USER_AGENT, "Watchdog Utils")
+        .bearer_auth(&config.keyhouse.token)
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => {
+            let contents: Vec<Value> = r.json().await?;
+            info!(target:get_log_target(), "Response: {:?}",contents);
+            contents
+                .into_iter()
+                .filter_map(|item| item["name"].as_str().map(String::from))
+                .collect()
+        }
+        Ok(r) => {
+            info!(target:get_log_target(), "Failed to fetch names: {}", r.status());
+            return Err(format!("HTTP error: {}", r.status()).into());
+        }
+        Err(e) => {
+            info!(target:get_log_target(), "Error fetching names: {:?}", e);
+            return Err(e.into());
+        }
+    };
+
+    info!(target:get_log_target(), "Found projects: {:?} for host {}", projects, config.hostname);
+    let mut user_projects: Vec<String> = Vec::new();
+    for project in &projects {
+        let project_url = format!(
+            "{}/contents/access/{}/{}/{}?ref=build",
+            config.keyhouse.base_url, config.hostname, project, userhash
+        );
+
+        match client
+            .get(&project_url)
+            .header(USER_AGENT, "Watchdog Utils")
+            .bearer_auth(&config.keyhouse.token)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => user_projects.push(project.clone()),
+            Ok(_) | Err(_) => continue,
+        }
+    }
+    Ok(user_projects)
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::config::test_init;
     use crate::services::github_service;
     use crate::utils::types::DiffAction;
     use std::collections::HashSet;
-
     /*
         use this to get diffs from Github
         #[test]
@@ -467,7 +526,7 @@ mod tests {
             rt.block_on(async {
                 let response = client
                     .get(&url)
-                    .header(USER_AGENT, "rust-webhook-server")
+                    .header(USER_AGENT, "Watchdog Utils")
                     .header(ACCEPT, "application/vnd.github.v3.diff")
                     .bearer_auth(config.keyhouse.token.as_str())
                     .send()
@@ -684,6 +743,40 @@ index b6955e2..0000000
             let result = github_service::extract_diff_parts(diff);
             assert_eq!(result.len(), 1);
             assert_eq!(result[0], expected);
+        });
+    }
+
+    #[test]
+    fn get_users_projects_test() {
+        let config = test_init("");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected = "centos".to_string();
+            let result = github_service::get_users_projects(
+                &config,
+                "8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0",
+            )
+            .await
+            .expect("Github request failed");
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0], expected);
+        });
+    }
+    #[test]
+    fn get_users_multi_projects_test() {
+        let config = test_init("");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected: HashSet<String> =
+                HashSet::from_iter(["centos".to_string(), "sudo".to_string()]);
+            let result = github_service::get_users_projects(
+                &config,
+                "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef",
+            )
+            .await
+            .expect("Github request failed");
+            let result_set = HashSet::from_iter(result);
+            assert_eq!(result_set, expected);
         });
     }
 }
