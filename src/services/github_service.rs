@@ -4,7 +4,9 @@ use crate::services::user_service::add_user_to_group;
 use crate::services::user_service::delete_user;
 use crate::services::user_service::remove_user_from_group;
 use crate::utils::cache_utils::{names_path, sync_full_cache, update_local_cache};
+use crate::utils::types::{DiffAction, DiffTypes};
 use anyhow::{Result, anyhow};
+use base64::{Engine as _, engine::general_purpose};
 use log::{error, info, warn};
 use regex::Regex;
 use reqwest::Client;
@@ -114,73 +116,58 @@ async fn process_diff(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for (cloud_provider, project, hash, status) in extract_diff_parts(diff) {
         info!(target:get_log_target(),
-            "Parsed diff - Project: {}, Cloud Provider: {}, Hash: {}, Status: {}",
-            project, cloud_provider, hash, status
+            "Parsed diff - Cloud Provider: {}, Project: {}, Hash: {}, Status: {:?}",
+            cloud_provider, project, hash, status
         );
 
-        let mut content_for_cache: Option<String> = None;
-        let mut username_for_action: Option<String> = None;
-        if let Some(decoded_str) = fetch_and_decode_file(
+        let username = fetch_and_decode_file(
             &config.keyhouse.base_url,
             &config.keyhouse.token,
             &hash,
             &status,
             last_commit,
         )
-        .await?
-        {
-            info!(target:get_log_target(), "Decoded file for hash {}", hash);
-            username_for_action = Some(decoded_str.clone());
+        .await?;
 
-            if cloud_provider == "names" {
-                content_for_cache = Some(decoded_str);
-            } else {
-                content_for_cache = Some("1".to_string());
-            }
-        }
+        info!(target:get_log_target(), "Decoded file for hash {}", hash);
 
-        if let Some(username) = username_for_action {
-            if cloud_provider == hostname || status == "deleteduser" {
-                if status == "added" && cloud_provider != "names" {
+        match status {
+            DiffAction::AddedGroup => {
+                if cloud_provider == hostname {
                     info!(target:get_log_target(), "Adding user '{}' to group '{}'...", username, project);
                     add_user_to_group(&username, &project).unwrap_or_else(|e| {
                         error!(target:get_log_target(), "Failed to add user: {}", e);
                     });
-                } else if status == "deleted" && cloud_provider != "names" {
+                } else {
+                    info!(target:get_log_target(), "Change for server '{}', not this server. Skipping system action.", cloud_provider);
+                }
+            }
+            DiffAction::DeletedGroup => {
+                if cloud_provider == hostname {
                     info!(target:get_log_target(), "Removing user '{}' from group '{}'...", username, project);
                     remove_user_from_group(&username, &project).unwrap_or_else(|e| {
                         error!(target:get_log_target(), "Failed to remove user: {}", e);
                     });
-                } else if status == "deleteduser" {
-                    info!(target:get_log_target(), "Deleting user '{}'...", username);
-                    delete_user(&username).unwrap_or_else(|e| {
-                        error!(target:get_log_target(), "Failed to delete user: {}", e);
-                    });
+                } else {
+                    info!(target:get_log_target(), "Change for server '{}', not this server. Skipping system action.", cloud_provider);
                 }
-            } else if cloud_provider != "names" {
-                info!(target:get_log_target(), "Change for server '{}', not this server. Skipping system action.", cloud_provider);
             }
-
-            let (cache_provider, cache_project) = if cloud_provider == "names" {
-                ("names", "")
-            } else {
-                (cloud_provider.as_str(), project.as_str())
-            };
-
-            if let Some(content) = content_for_cache {
-                update_local_cache(
-                    config,
-                    cache_project,
-                    cache_provider,
-                    &hash,
-                    &status,
-                    &content,
-                )
-                .unwrap_or_else(
-                    |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
-                );
+            DiffAction::DeletedUser => {
+                info!(target:get_log_target(), "Deleting user '{}'...", username);
+                delete_user(&username).unwrap_or_else(|e| {
+                    error!(target:get_log_target(), "Failed to delete user: {}", e);
+                });
+            }
+            DiffAction::ModifiedUser => {
+                //TODO add logic
+            }
+            DiffAction::AddedUser => {
+                info!(target: get_log_target(), "New key added for user {}", username);
             }
         }
+
+        update_local_cache(config, &project, &cloud_provider, &hash, &status, &username)
+            .unwrap_or_else(|e| warn!(target:get_log_target(), "Failed to update cache: {}", e));
     }
 
     Ok(())
@@ -209,18 +196,17 @@ pub async fn fetch_recent_commit(
         Err("No commits found".into())
     }
 }
-use base64::{Engine as _, engine::general_purpose};
+
 pub async fn fetch_and_decode_file(
     base_url: &str,
     token: &str,
     hash: &str,
-    status: &str,
+    status: &DiffAction,
     base_commit: &str,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let commit_ref = if status == "deleted" || status == "deleteduser" {
-        base_commit
-    } else {
-        "build"
+) -> Result<String, Box<dyn std::error::Error>> {
+    let commit_ref = match status {
+        DiffAction::DeletedGroup | DiffAction::DeletedUser => base_commit,
+        _ => "build",
     };
 
     let url = format!("{}/contents/names/{}?ref={}", base_url, hash, commit_ref);
@@ -238,7 +224,10 @@ pub async fn fetch_and_decode_file(
             url,
             file_resp.status()
         );
-        return Ok(None);
+        return Err(Box::new(io::Error::new(
+            io::ErrorKind::HostUnreachable,
+            "GitHub API returned error",
+        )));
     }
     let file_json = file_resp.json::<serde_json::Value>().await?;
     if let Some(base64_content) = file_json["content"].as_str() {
@@ -246,13 +235,16 @@ pub async fn fetch_and_decode_file(
         let decoded = general_purpose::STANDARD.decode(&clean_base64)?;
         let decoded_str = String::from_utf8(decoded)?;
         info!(target:get_log_target(), "Decoded file for hash {}", hash);
-        Ok(Some(decoded_str))
+        Ok(decoded_str)
     } else {
         warn!(target:get_log_target(), "No 'content' field found for file hash {}", hash);
-        Ok(None)
+        Err(Box::new(io::Error::new(
+            io::ErrorKind::NotFound,
+            "No 'content' field found",
+        )))
     }
 }
-pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, String)> {
+pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, DiffAction)> {
     let re_access = Regex::new(
         r"diff --git a/access/([^/]+)/([^/]+)/([\w\d]+) b/access/([^/]+)/([^/]+)/([\w\d]+)",
     )
@@ -263,100 +255,88 @@ pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, Strin
     while let Some(line) = diff_data_lines.next() {
         let next_line = diff_data_lines.peek().unwrap_or(&"");
         if let Some(caps) = re_access.captures(line) {
-            let project1 = &caps[1];
-            let provider1 = &caps[2];
+            let provider1 = &caps[1];
+            let project1 = &caps[2];
             let hash1 = &caps[3];
-            let project2 = &caps[4];
-            let provider2 = &caps[5];
+            let provider2 = &caps[4];
+            let project2 = &caps[5];
             let hash2 = &caps[6];
 
-            if next_line.contains("new file mode") {
+            if next_line.contains(format!("{}", DiffTypes::Added).as_str()) {
                 parts_with_status
                     .entry((
-                        project1.to_string(),
                         provider1.to_string(),
+                        project1.to_string(),
                         hash1.to_string(),
                     ))
-                    .or_insert("added".to_string());
+                    .or_insert(DiffAction::AddedGroup);
                 info!(target:get_log_target(),
-                    "Access file change detected: {}/{}/{}, status: {}",
-                    project1, provider1, hash1, "added"
+                    "Access file change detected: {}/{}/{}, status: {:?}",
+                    provider1, project1, hash1, DiffAction::AddedGroup
                 );
-            } else if next_line.contains("deleted file mode") {
+            } else if next_line.contains(format!("{}", DiffTypes::Deleted).as_str()) {
                 parts_with_status
                     .entry((
-                        project1.to_string(),
                         provider1.to_string(),
+                        project1.to_string(),
                         hash1.to_string(),
                     ))
-                    .or_insert("deleted".to_string());
+                    .or_insert(DiffAction::DeletedGroup);
                 info!(target:get_log_target(),
-                    "Access file change detected: {}/{}/{}, status: {}",
-                    project1, provider1, hash1, "deleted"
+                    "Access file change detected: {}/{}/{}, status: {:?}",
+                    provider1, project1, hash1, DiffAction::DeletedGroup
                 );
-            } else if next_line.contains("similarity index 100%") {
+            } else if next_line.contains(format!("{}", DiffTypes::Renamed).as_str()) {
                 parts_with_status
                     .entry((
-                        project1.to_string(),
                         provider1.to_string(),
+                        project1.to_string(),
                         hash1.to_string(),
                     ))
-                    .or_insert("deleted".to_string());
+                    .or_insert(DiffAction::DeletedGroup);
                 parts_with_status
                     .entry((
-                        project2.to_string(),
                         provider2.to_string(),
+                        project2.to_string(),
                         hash2.to_string(),
                     ))
-                    .or_insert("added".to_string());
+                    .or_insert(DiffAction::AddedGroup);
                 info!(target:get_log_target(),
-                    "Access file change detected: {}/{}/{}, status: {}",
-                    project1, provider1, hash1, "deleted"
+                    "Access file change detected: {}/{}/{}, status: {:?}",
+                    provider1, project1, hash1, DiffAction::DeletedGroup
                 );
                 info!(target:get_log_target(),
-                    "Access file change detected: {}/{}/{}, status: {}",
-                    project2, provider2, hash2, "added"
-                );
-            } else {
-                parts_with_status
-                    .entry((
-                        project1.to_string(),
-                        provider1.to_string(),
-                        hash1.to_string(),
-                    ))
-                    .or_insert("modified".to_string());
-                info!(target:get_log_target(),
-                    "Access file change detected: {}/{}/{}, status: {}",
-                    project1, provider1, hash1, "modified"
+                    "Access file change detected: {}/{}/{}, status: {:?}",
+                    provider2, project2, hash2, DiffAction::AddedGroup
                 );
             }
         } else if let Some(caps) = re_names.captures(line) {
             let hash1 = &caps[1];
             let hash2 = &caps[2];
-            if next_line.contains("new file mode") {
+            if next_line.contains(format!("{}", DiffTypes::Added).as_str()) {
                 parts_with_status
-                    .entry(("".to_string(), "names".to_string(), hash1.to_string()))
-                    .or_insert("addeduser".to_string());
-                info!(target:get_log_target(), "Name file change detected: {}, status: {}", hash1, "addeduser");
-            } else if next_line.contains("deleted file mode") {
+                    .entry(("".to_string(), "".to_string(), hash1.to_string()))
+                    .or_insert(DiffAction::AddedUser);
+                info!(target:get_log_target(), "Name file change detected: {}, status: {:?}", hash1,DiffAction::AddedUser);
+            } else if next_line.contains(format!("{}", DiffTypes::Deleted).as_str()) {
                 parts_with_status
-                    .entry(("".to_string(), "names".to_string(), hash1.to_string()))
-                    .or_insert("deleteduser".to_string());
-                info!(target:get_log_target(), "Name file change detected: {}, status: {}", hash1, "deleteduser");
-            } else if next_line.contains("similarity index 100%") {
+                    .entry(("".to_string(), "".to_string(), hash1.to_string()))
+                    .or_insert(DiffAction::DeletedUser);
+                info!(target:get_log_target(), "Name file change detected: {}, status: {:?}", hash1, DiffAction::DeletedUser);
+            } else if next_line.contains(format!("{}", DiffTypes::Renamed).as_str()) {
                 parts_with_status
-                    .entry(("".to_string(), "names".to_string(), hash1.to_string()))
-                    .or_insert("deleteduser".to_string());
+                    .entry(("".to_string(), "".to_string(), hash1.to_string()))
+                    .or_insert(DiffAction::DeletedUser);
                 parts_with_status
-                    .entry(("".to_string(), "names".to_string(), hash2.to_string()))
-                    .or_insert("addeduser".to_string());
-                info!(target:get_log_target(), "Name file change detected: {}, status: {}", hash1, "deleteduser");
-                info!(target:get_log_target(), "Name file change detected: {}, status: {}", hash2, "addeduser");
+                    .entry(("".to_string(), "".to_string(), hash2.to_string()))
+                    .or_insert(DiffAction::AddedUser);
+                info!(target:get_log_target(), "Name file change detected: {}, status: {:?}", hash1, DiffAction::DeletedUser);
+                info!(target:get_log_target(), "Name file change detected: {}, status: {:?}", hash2, DiffAction::AddedUser);
             } else {
                 parts_with_status
                     .entry(("".to_string(), "names".to_string(), hash1.to_string()))
-                    .or_insert("modifieduser".to_string());
-                info!(target:get_log_target(), "Name file change detected: {}, status: {}", hash1, "modifieduser");
+                    .or_insert(DiffAction::ModifiedUser);
+                info!(target:get_log_target(), "Name file change detected: {}, status: {:?}", hash1, "modifieduser");
             };
         }
     }

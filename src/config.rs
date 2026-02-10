@@ -15,7 +15,6 @@ pub struct Config {
     pub hostname: String,
     pub keyhouse: KeyhouseConf,
     pub cache_path: PathBuf, // Recieved from main watchdog
-    pub branch: String,
 }
 
 impl Config {
@@ -34,7 +33,6 @@ impl Config {
             hostname,
             keyhouse,
             cache_path,
-            branch: "build".to_string(),
         }
     }
 }
