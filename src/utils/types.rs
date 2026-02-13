@@ -7,7 +7,7 @@ pub enum DiffTypes {
     Renamed,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum DiffAction {
     AddedGroup,
     AddedUser,
