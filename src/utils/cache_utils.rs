@@ -75,7 +75,7 @@ pub async fn sync_full_cache(config: &Config) -> Result<(), Box<dyn std::error::
     let resp: Value = client
         .get(&tree_url)
         .bearer_auth(&config.keyhouse.token)
-        .header(USER_AGENT, "scout-server-cache-sync")
+        .header(USER_AGENT, "Watchdog Utils")
         .header(ACCEPT, "application/vnd.github.v3+json")
         .send()
         .await?
