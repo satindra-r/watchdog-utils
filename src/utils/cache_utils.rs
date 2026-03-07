@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Config, get_log_target};
 use crate::services::github_service::fetch_and_decode_file;
 use crate::utils::types::DiffAction;
 use anyhow::Result;
@@ -43,14 +43,14 @@ pub fn update_local_cache(
                 fs::create_dir_all(parent)?;
             }
             fs::write(&cache_file_path, content)?;
-            info!("Cache Updated (Write): {cache_file_path:?}");
+            info!(target:get_log_target(),"Cache Updated (Write): {cache_file_path:?}");
         }
         DiffAction::DeletedGroup | DiffAction::DeletedUser => {
             let _ = fs::remove_file(&cache_file_path);
-            info!("Cache Updated (Remove): {cache_file_path:?}");
+            info!(target:get_log_target(),"Cache Updated (Remove): {cache_file_path:?}");
         }
         DiffAction::ModifiedUser => {
-            //TODO handle this
+            warn!(target:get_log_target(),"ModifiedUser action is not handled in update_local_cache.");
         }
     }
 
@@ -65,7 +65,7 @@ pub async fn sync_full_cache(config: &Config) -> Result<(), Box<dyn std::error::
         fs::remove_dir_all(cache_base_path)?;
     }
     fs::create_dir_all(cache_base_path)?;
-    info!("Cleared and initialized local cache for full sync at {cache_base_path:?}");
+    info!(target:get_log_target(),"Cleared and initialized local cache for full sync at {cache_base_path:?}");
 
     let client = reqwest::Client::new();
     info!("Performing full cache sync. This might take a moment...");
@@ -104,7 +104,7 @@ pub async fn sync_full_cache(config: &Config) -> Result<(), Box<dyn std::error::
                         &DiffAction::AddedGroup,
                         "",
                     )
-                    .unwrap_or_else(|e| warn!("Failed to update access cache for {hash}: {e}"));
+                    .unwrap_or_else(|e| warn!(target:get_log_target(),"Failed to update access cache for {hash}: {e}"));
                 } else if path.starts_with("names/") && path_parts.len() == 2 {
                     let hash = path_parts[1];
                     let username = fetch_and_decode_file(
@@ -117,12 +117,12 @@ pub async fn sync_full_cache(config: &Config) -> Result<(), Box<dyn std::error::
                     .await?;
 
                     update_local_cache(config, "", "", hash, &DiffAction::AddedUser, &username)
-                        .unwrap_or_else(|e| warn!("Failed to update names cache for {hash}: {e}"));
+                        .unwrap_or_else(|e| warn!(target:get_log_target(),"Failed to update names cache for {hash}: {e}"));
                 }
             }
         }
     }
-    info!("Full cache sync completed.");
+    info!(target:get_log_target(),"Full cache sync completed.");
     Ok(())
 }
 

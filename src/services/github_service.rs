@@ -114,22 +114,22 @@ async fn process_diff(
     last_commit: &str,
     _merge_commit: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for (cloud_provider, project, hash, status) in extract_diff_parts(diff) {
+    for (cloud_provider, project, hash1, hash2, status) in extract_diff_parts(diff) {
         info!(target:get_log_target(),
             "Parsed diff - Cloud Provider: {}, Project: {}, Hash: {}, Status: {:?}",
-            cloud_provider, project, hash, status
+            cloud_provider, project, hash1, status
         );
 
         let username = fetch_and_decode_file(
             &config.keyhouse.base_url,
             &config.keyhouse.token,
-            &hash,
+            &hash1,
             &status,
             last_commit,
         )
         .await?;
 
-        info!(target:get_log_target(), "Decoded file for hash {}", hash);
+        info!(target:get_log_target(), "Decoded file for hash {}", hash1);
 
         match status {
             DiffAction::AddedGroup => {
@@ -138,6 +138,17 @@ async fn process_diff(
                     add_user_to_group(&username, &project).unwrap_or_else(|e| {
                         error!(target:get_log_target(), "Failed to add user: {}", e);
                     });
+                    update_local_cache(
+                        config,
+                        &project,
+                        &cloud_provider,
+                        &hash1,
+                        &status,
+                        &username,
+                    )
+                    .unwrap_or_else(
+                        |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
+                    );
                 } else {
                     info!(target:get_log_target(), "Change for server '{}', not this server. Skipping system action.", cloud_provider);
                 }
@@ -149,13 +160,24 @@ async fn process_diff(
                         error!(target:get_log_target(), "Failed to remove user: {}", e);
                     });
 
-                    let projects = get_users_projects(config, &hash).await?;
+                    let projects = get_users_projects(config, &hash1).await?;
                     if projects.is_empty() {
                         info!(target:get_log_target(), "No other projects, deleting user '{}'...", username);
                         delete_user(&username).unwrap_or_else(|e| {
                             error!(target:get_log_target(), "Failed to delete user: {}", e);
                         });
                     }
+                    update_local_cache(
+                        config,
+                        &project,
+                        &cloud_provider,
+                        &hash1,
+                        &status,
+                        &username,
+                    )
+                    .unwrap_or_else(
+                        |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
+                    );
                 } else {
                     info!(target:get_log_target(), "Change for server '{}', not this server. Skipping system action.", cloud_provider);
                 }
@@ -165,21 +187,88 @@ async fn process_diff(
                 delete_user(&username).unwrap_or_else(|e| {
                     error!(target:get_log_target(), "Failed to delete user: {}", e);
                 });
+                update_local_cache(
+                    config,
+                    &project,
+                    &cloud_provider,
+                    &hash1,
+                    &status,
+                    &username,
+                )
+                .unwrap_or_else(
+                    |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
+                );
             }
             DiffAction::ModifiedUser => {
-                //TODO: Add cache update logic
-                let _projects = get_users_projects(config, &hash).await?;
-                delete_user(&username).unwrap_or_else(|e| {
-                    error!(target:get_log_target(), "Failed to delete user: {}", e);
-                });
+                let projects = get_users_projects(config, &hash2).await?;
+                //delete groups for old user
+                for del_project in &projects {
+                    update_local_cache(
+                        config,
+                        del_project,
+                        &cloud_provider,
+                        &hash1,
+                        &DiffAction::DeletedGroup,
+                        &username,
+                    )
+                    .unwrap_or_else(
+                        |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
+                    );
+                }
+                //delete old user
+                update_local_cache(
+                    config,
+                    &project,
+                    &cloud_provider,
+                    &hash1,
+                    &DiffAction::DeletedUser,
+                    &username,
+                )
+                .unwrap_or_else(
+                    |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
+                );
+                //add new user
+                update_local_cache(
+                    config,
+                    &project,
+                    &cloud_provider,
+                    &hash2,
+                    &DiffAction::AddedUser,
+                    &username,
+                )
+                .unwrap_or_else(
+                    |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
+                );
+                //add groups for new user
+                for add_project in &projects {
+                    update_local_cache(
+                        config,
+                        add_project,
+                        &cloud_provider,
+                        &hash1,
+                        &DiffAction::AddedGroup,
+                        &username,
+                    )
+                    .unwrap_or_else(
+                        |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
+                    );
+                }
             }
             DiffAction::AddedUser => {
                 info!(target: get_log_target(), "New key added for user {}", username);
+                update_local_cache(
+                    config,
+                    &project,
+                    &cloud_provider,
+                    &hash1,
+                    &status,
+                    &username,
+                )
+                .unwrap_or_else(
+                    |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
+                );
             }
         }
-
-        update_local_cache(config, &project, &cloud_provider, &hash, &status, &username)
-            .unwrap_or_else(|e| warn!(target:get_log_target(), "Failed to update cache: {}", e));
     }
 
     Ok(())
@@ -256,7 +345,7 @@ pub async fn fetch_and_decode_file(
         )))
     }
 }
-pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, DiffAction)> {
+pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, String, DiffAction)> {
     let re_access = Regex::new(
         r"diff --git a/access/([^/]+)/([^/]+)/([\w\d]+) b/access/([^/]+)/([^/]+)/([\w\d]+)",
     )
@@ -280,6 +369,7 @@ pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, DiffA
                         provider1.to_string(),
                         project1.to_string(),
                         hash1.to_string(),
+                        "".to_string(),
                     ))
                     .or_insert(DiffAction::AddedGroup);
                 info!(target:get_log_target(),
@@ -292,6 +382,7 @@ pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, DiffA
                         provider1.to_string(),
                         project1.to_string(),
                         hash1.to_string(),
+                        "".to_string(),
                     ))
                     .or_insert(DiffAction::DeletedGroup);
                 info!(target:get_log_target(),
@@ -304,6 +395,7 @@ pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, DiffA
                         provider1.to_string(),
                         project1.to_string(),
                         hash1.to_string(),
+                        "".to_string(),
                     ))
                     .or_insert(DiffAction::DeletedGroup);
                 parts_with_status
@@ -311,6 +403,7 @@ pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, DiffA
                         provider2.to_string(),
                         project2.to_string(),
                         hash2.to_string(),
+                        "".to_string(),
                     ))
                     .or_insert(DiffAction::AddedGroup);
                 info!(target:get_log_target(),
@@ -324,22 +417,37 @@ pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, DiffA
             }
         } else if let Some(caps) = re_names.captures(line) {
             let hash1 = &caps[1];
-            let _hash2 = &caps[2];
+            let hash2 = &caps[2];
             if next_line.contains(format!("{}", DiffTypes::Added).as_str()) {
                 parts_with_status
-                    .entry(("".to_string(), "".to_string(), hash1.to_string()))
+                    .entry((
+                        "".to_string(),
+                        "".to_string(),
+                        hash1.to_string(),
+                        "".to_string(),
+                    ))
                     .or_insert(DiffAction::AddedUser);
                 info!(target:get_log_target(), "Name file change detected: {}, status: {:?}", hash1,DiffAction::AddedUser);
             } else if next_line.contains(format!("{}", DiffTypes::Deleted).as_str()) {
                 parts_with_status
-                    .entry(("".to_string(), "".to_string(), hash1.to_string()))
+                    .entry((
+                        "".to_string(),
+                        "".to_string(),
+                        hash1.to_string(),
+                        "".to_string(),
+                    ))
                     .or_insert(DiffAction::DeletedUser);
                 info!(target:get_log_target(), "Name file change detected: {}, status: {:?}", hash1, DiffAction::DeletedUser);
             } else if next_line.contains(format!("{}", DiffTypes::Renamed).as_str()) {
                 parts_with_status
-                    .entry(("".to_string(), "".to_string(), hash1.to_string()))
+                    .entry((
+                        "".to_string(),
+                        "".to_string(),
+                        hash1.to_string(),
+                        hash2.to_string(),
+                    ))
                     .or_insert(DiffAction::ModifiedUser);
-                info!(target:get_log_target(), "Name file change detected: {}, status: {:?}", hash1, "modifieduser");
+                info!(target:get_log_target(), "Name file change detected: {} to {}, status: {:?}", hash1,hash2, DiffAction::ModifiedUser);
             } else {
                 info!(target:get_log_target(), "Unknown diff");
             };
@@ -347,7 +455,7 @@ pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, DiffA
     }
     parts_with_status
         .into_iter()
-        .map(|((proj, prov, hash), status)| (proj, prov, hash, status))
+        .map(|((proj, prov, hash1, hash2), status)| (proj, prov, hash1, hash2, status))
         .collect()
 }
 pub async fn fetch_diff(
@@ -559,6 +667,7 @@ index 0000000..56a6051
                 "centos".to_string(),
                 "proxy".to_string(),
                 "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
+                "".to_string(),
                 DiffAction::AddedGroup,
             );
             let result = github_service::extract_diff_parts(diff);
@@ -584,6 +693,7 @@ index 56a6051..0000000
                 "centos".to_string(),
                 "proxy".to_string(),
                 "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
+                "".to_string(),
                 DiffAction::DeletedGroup,
             );
             let result = github_service::extract_diff_parts(diff);
@@ -613,20 +723,25 @@ index 0000000..56a6051
 "#;
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let expected: HashSet<(String, String, String, DiffAction)> = HashSet::from_iter([
-                (
-                    "centos".to_string(),
-                    "proxy".to_string(),
-                    "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
-                    DiffAction::AddedGroup,
-                ),
-                (
-                    "centos".to_string(),
-                    "broker".to_string(),
-                    "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
-                    DiffAction::AddedGroup,
-                ),
-            ]);
+            let expected: HashSet<(String, String, String, String, DiffAction)> =
+                HashSet::from_iter([
+                    (
+                        "centos".to_string(),
+                        "proxy".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        "".to_string(),
+                        DiffAction::AddedGroup,
+                    ),
+                    (
+                        "centos".to_string(),
+                        "broker".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        "".to_string(),
+                        DiffAction::AddedGroup,
+                    ),
+                ]);
             let result = github_service::extract_diff_parts(diff);
             let result_set = HashSet::from_iter(result);
             assert_eq!(result_set, expected);
@@ -653,20 +768,25 @@ index 56a6051..0000000
 "#;
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let expected: HashSet<(String, String, String, DiffAction)> = HashSet::from_iter([
-                (
-                    "centos".to_string(),
-                    "proxy".to_string(),
-                    "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
-                    DiffAction::DeletedGroup,
-                ),
-                (
-                    "centos".to_string(),
-                    "broker".to_string(),
-                    "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
-                    DiffAction::DeletedGroup,
-                ),
-            ]);
+            let expected: HashSet<(String, String, String, String, DiffAction)> =
+                HashSet::from_iter([
+                    (
+                        "centos".to_string(),
+                        "proxy".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        "".to_string(),
+                        DiffAction::DeletedGroup,
+                    ),
+                    (
+                        "centos".to_string(),
+                        "broker".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        "".to_string(),
+                        DiffAction::DeletedGroup,
+                    ),
+                ]);
             let result = github_service::extract_diff_parts(diff);
             let result_set = HashSet::from_iter(result);
             assert_eq!(result_set, expected);
@@ -682,20 +802,25 @@ rename to access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3
 "#;
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let expected: HashSet<(String, String, String, DiffAction)> = HashSet::from_iter([
-                (
-                    "centos".to_string(),
-                    "proxy".to_string(),
-                    "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
-                    DiffAction::DeletedGroup,
-                ),
-                (
-                    "centos".to_string(),
-                    "broker".to_string(),
-                    "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
-                    DiffAction::AddedGroup,
-                ),
-            ]);
+            let expected: HashSet<(String, String, String, String, DiffAction)> =
+                HashSet::from_iter([
+                    (
+                        "centos".to_string(),
+                        "proxy".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        "".to_string(),
+                        DiffAction::DeletedGroup,
+                    ),
+                    (
+                        "centos".to_string(),
+                        "broker".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        "".to_string(),
+                        DiffAction::AddedGroup,
+                    ),
+                ]);
             let result = github_service::extract_diff_parts(diff);
             let result_set = HashSet::from_iter(result);
             assert_eq!(result_set, expected);
@@ -719,6 +844,7 @@ index 0000000..b6955e2
                 "".to_string(),
                 "".to_string(),
                 "8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0".to_string(),
+                "".to_string(),
                 DiffAction::AddedUser,
             );
             let result = github_service::extract_diff_parts(diff);
@@ -743,6 +869,7 @@ index b6955e2..0000000
                 "".to_string(),
                 "".to_string(),
                 "8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0".to_string(),
+                "".to_string(),
                 DiffAction::DeletedUser,
             );
             let result = github_service::extract_diff_parts(diff);
