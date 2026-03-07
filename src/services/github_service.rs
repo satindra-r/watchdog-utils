@@ -115,7 +115,7 @@ async fn process_diff(
     _merge_commit: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut hasModifiedUser = false;
-    for (cloud_provider, project, hash1, _hash2, status) in extract_diff_parts(diff) {
+    for (cloud_provider, project, hash1, hash2, status) in extract_diff_parts(diff) {
         info!(target:get_log_target(),
             "Parsed diff - Cloud Provider: {}, Project: {}, Hash: {}, Status: {:?}",
             cloud_provider, project, hash1, status
@@ -124,7 +124,7 @@ async fn process_diff(
         let username = fetch_and_decode_file(
             &config.keyhouse.base_url,
             &config.keyhouse.token,
-            &hash1,
+            &hash2,
             &status,
             last_commit,
         )
@@ -288,7 +288,7 @@ pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, Strin
                         provider1.to_string(),
                         project1.to_string(),
                         hash1.to_string(),
-                        "".to_string(),
+                        hash1.to_string(),
                     ))
                     .or_insert(DiffAction::AddedGroup);
                 info!(target:get_log_target(),
@@ -301,7 +301,7 @@ pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, Strin
                         provider1.to_string(),
                         project1.to_string(),
                         hash1.to_string(),
-                        "".to_string(),
+                        hash1.to_string(),
                     ))
                     .or_insert(DiffAction::DeletedGroup);
                 info!(target:get_log_target(),
@@ -314,7 +314,7 @@ pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, Strin
                         provider1.to_string(),
                         project1.to_string(),
                         hash1.to_string(),
-                        "".to_string(),
+                        hash1.to_string(),
                     ))
                     .or_insert(DiffAction::DeletedGroup);
                 parts_with_status
@@ -322,7 +322,7 @@ pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, Strin
                         provider2.to_string(),
                         project2.to_string(),
                         hash2.to_string(),
-                        "".to_string(),
+                        hash1.to_string(),
                     ))
                     .or_insert(DiffAction::AddedGroup);
                 info!(target:get_log_target(),
@@ -343,7 +343,7 @@ pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, Strin
                         "".to_string(),
                         "".to_string(),
                         hash1.to_string(),
-                        "".to_string(),
+                        hash1.to_string(),
                     ))
                     .or_insert(DiffAction::AddedUser);
                 info!(target:get_log_target(), "Name file change detected: {}, status: {:?}", hash1,DiffAction::AddedUser);
@@ -353,7 +353,7 @@ pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, Strin
                         "".to_string(),
                         "".to_string(),
                         hash1.to_string(),
-                        "".to_string(),
+                        hash1.to_string(),
                     ))
                     .or_insert(DiffAction::DeletedUser);
                 info!(target:get_log_target(), "Name file change detected: {}, status: {:?}", hash1, DiffAction::DeletedUser);
@@ -586,7 +586,7 @@ index 0000000..56a6051
                 "centos".to_string(),
                 "proxy".to_string(),
                 "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
-                "".to_string(),
+                "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
                 DiffAction::AddedGroup,
             );
             let result = github_service::extract_diff_parts(diff);
@@ -612,7 +612,7 @@ index 56a6051..0000000
                 "centos".to_string(),
                 "proxy".to_string(),
                 "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
-                "".to_string(),
+                "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
                 DiffAction::DeletedGroup,
             );
             let result = github_service::extract_diff_parts(diff);
@@ -649,7 +649,8 @@ index 0000000..56a6051
                         "proxy".to_string(),
                         "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
                             .to_string(),
-                        "".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
                         DiffAction::AddedGroup,
                     ),
                     (
@@ -657,7 +658,8 @@ index 0000000..56a6051
                         "broker".to_string(),
                         "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
                             .to_string(),
-                        "".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
                         DiffAction::AddedGroup,
                     ),
                 ]);
@@ -694,7 +696,8 @@ index 56a6051..0000000
                         "proxy".to_string(),
                         "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
                             .to_string(),
-                        "".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
                         DiffAction::DeletedGroup,
                     ),
                     (
@@ -702,7 +705,8 @@ index 56a6051..0000000
                         "broker".to_string(),
                         "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
                             .to_string(),
-                        "".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
                         DiffAction::DeletedGroup,
                     ),
                 ]);
@@ -728,7 +732,8 @@ rename to access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3
                         "proxy".to_string(),
                         "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
                             .to_string(),
-                        "".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
                         DiffAction::DeletedGroup,
                     ),
                     (
@@ -736,7 +741,8 @@ rename to access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3
                         "broker".to_string(),
                         "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
                             .to_string(),
-                        "".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
                         DiffAction::AddedGroup,
                     ),
                 ]);
@@ -763,7 +769,7 @@ index 0000000..b6955e2
                 "".to_string(),
                 "".to_string(),
                 "8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0".to_string(),
-                "".to_string(),
+                "8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0".to_string(),
                 DiffAction::AddedUser,
             );
             let result = github_service::extract_diff_parts(diff);
@@ -788,7 +794,7 @@ index b6955e2..0000000
                 "".to_string(),
                 "".to_string(),
                 "8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0".to_string(),
-                "".to_string(),
+                "8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0".to_string(),
                 DiffAction::DeletedUser,
             );
             let result = github_service::extract_diff_parts(diff);
