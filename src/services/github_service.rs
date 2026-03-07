@@ -148,6 +148,14 @@ async fn process_diff(
                     remove_user_from_group(&username, &project).unwrap_or_else(|e| {
                         error!(target:get_log_target(), "Failed to remove user: {}", e);
                     });
+
+                    let projects = get_users_projects(config, &hash).await?;
+                    if projects.is_empty() {
+                        info!(target:get_log_target(), "No other projects, deleting user '{}'...", username);
+                        delete_user(&username).unwrap_or_else(|e| {
+                            error!(target:get_log_target(), "Failed to delete user: {}", e);
+                        });
+                    }
                 } else {
                     info!(target:get_log_target(), "Change for server '{}', not this server. Skipping system action.", cloud_provider);
                 }
@@ -159,7 +167,11 @@ async fn process_diff(
                 });
             }
             DiffAction::ModifiedUser => {
-                //TODO add logic
+                //TODO: Add cache update logic
+                let _projects = get_users_projects(config, &hash).await?;
+                delete_user(&username).unwrap_or_else(|e| {
+                    error!(target:get_log_target(), "Failed to delete user: {}", e);
+                });
             }
             DiffAction::AddedUser => {
                 info!(target: get_log_target(), "New key added for user {}", username);
@@ -312,7 +324,7 @@ pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, DiffA
             }
         } else if let Some(caps) = re_names.captures(line) {
             let hash1 = &caps[1];
-            let hash2 = &caps[2];
+            let _hash2 = &caps[2];
             if next_line.contains(format!("{}", DiffTypes::Added).as_str()) {
                 parts_with_status
                     .entry(("".to_string(), "".to_string(), hash1.to_string()))
@@ -326,17 +338,10 @@ pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, DiffA
             } else if next_line.contains(format!("{}", DiffTypes::Renamed).as_str()) {
                 parts_with_status
                     .entry(("".to_string(), "".to_string(), hash1.to_string()))
-                    .or_insert(DiffAction::DeletedUser);
-                parts_with_status
-                    .entry(("".to_string(), "".to_string(), hash2.to_string()))
-                    .or_insert(DiffAction::AddedUser);
-                info!(target:get_log_target(), "Name file change detected: {}, status: {:?}", hash1, DiffAction::DeletedUser);
-                info!(target:get_log_target(), "Name file change detected: {}, status: {:?}", hash2, DiffAction::AddedUser);
-            } else {
-                parts_with_status
-                    .entry(("".to_string(), "".to_string(), hash1.to_string()))
                     .or_insert(DiffAction::ModifiedUser);
                 info!(target:get_log_target(), "Name file change detected: {}, status: {:?}", hash1, "modifieduser");
+            } else {
+                info!(target:get_log_target(), "Unknown diff");
             };
         }
     }
