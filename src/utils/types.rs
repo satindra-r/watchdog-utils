@@ -7,13 +7,13 @@ pub enum DiffTypes {
     Renamed,
 }
 
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub enum DiffAction {
-    AddedGroup,
-    AddedUser,
-    DeletedGroup,
-    DeletedUser,
-    ModifiedUser,
+    ModifiedUser = 1,
+    DeletedGroup = 2,
+    DeletedUser = 3,
+    AddedGroup = 4,
+    AddedUser = 5,
 }
 
 impl fmt::Display for DiffTypes {

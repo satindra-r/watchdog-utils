@@ -115,11 +115,24 @@ async fn process_diff(
     _merge_commit: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut hasModifiedUser = false;
+    let mut diff_parts = extract_diff_parts(diff);
+    diff_parts.sort_unstable_by(|a, b| a.4.cmp(&b.4));
+
+    let mut modified_hashes: HashMap<String, String> = HashMap::new();
+
     for (cloud_provider, project, hash1, hash2, status) in extract_diff_parts(diff) {
         info!(target:get_log_target(),
-            "Parsed diff - Cloud Provider: {}, Project: {}, Hash: {}, Status: {:?}",
-            cloud_provider, project, hash1, status
+            "Parsed diff - Cloud Provider: {}, Project: {}, Hash1: {}, Hash2: {}, Status: {:?}",
+            cloud_provider, project, hash1, hash2, status
         );
+        let mut hash2 = hash2.to_string();
+
+        match status {
+            DiffAction::AddedGroup | DiffAction::AddedUser => {
+                hash2 = modified_hashes.get(&hash2).unwrap_or(&hash2).clone()
+            }
+            _ => {}
+        }
 
         let username = fetch_and_decode_file(
             &config.keyhouse.base_url,
@@ -168,22 +181,25 @@ async fn process_diff(
                 });
             }
             DiffAction::ModifiedUser => {
-                info!(target: get_log_target(), "Key modified for user {}", username);
                 hasModifiedUser = true;
+                modified_hashes.insert(hash1.to_string(), hash2.to_string());
+                info!(target: get_log_target(), "Key modified for user {}", username);
             }
             DiffAction::AddedUser => {
                 info!(target: get_log_target(), "New key added for user {}", username);
             }
         }
-        update_local_cache(
-            config,
-            &project,
-            &cloud_provider,
-            &hash1,
-            &status,
-            &username,
-        )
-        .unwrap_or_else(|e| warn!(target:get_log_target(), "Failed to update cache: {}", e));
+        if !hasModifiedUser {
+            update_local_cache(
+                config,
+                &project,
+                &cloud_provider,
+                &hash1,
+                &status,
+                &username,
+            )
+            .unwrap_or_else(|e| warn!(target:get_log_target(), "Failed to update cache: {}", e));
+        }
     }
 
     if hasModifiedUser {
@@ -322,7 +338,7 @@ pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, Strin
                         provider2.to_string(),
                         project2.to_string(),
                         hash2.to_string(),
-                        hash1.to_string(),
+                        hash2.to_string(),
                     ))
                     .or_insert(DiffAction::AddedGroup);
                 info!(target:get_log_target(),
