@@ -114,7 +114,8 @@ async fn process_diff(
     last_commit: &str,
     _merge_commit: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for (cloud_provider, project, hash1, hash2, status) in extract_diff_parts(diff) {
+    let mut hasModifiedUser = false;
+    for (cloud_provider, project, hash1, _hash2, status) in extract_diff_parts(diff) {
         info!(target:get_log_target(),
             "Parsed diff - Cloud Provider: {}, Project: {}, Hash: {}, Status: {:?}",
             cloud_provider, project, hash1, status
@@ -138,17 +139,6 @@ async fn process_diff(
                     add_user_to_group(&username, &project).unwrap_or_else(|e| {
                         error!(target:get_log_target(), "Failed to add user: {}", e);
                     });
-                    update_local_cache(
-                        config,
-                        &project,
-                        &cloud_provider,
-                        &hash1,
-                        &status,
-                        &username,
-                    )
-                    .unwrap_or_else(
-                        |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
-                    );
                 } else {
                     info!(target:get_log_target(), "Change for server '{}', not this server. Skipping system action.", cloud_provider);
                 }
@@ -167,17 +157,6 @@ async fn process_diff(
                             error!(target:get_log_target(), "Failed to delete user: {}", e);
                         });
                     }
-                    update_local_cache(
-                        config,
-                        &project,
-                        &cloud_provider,
-                        &hash1,
-                        &status,
-                        &username,
-                    )
-                    .unwrap_or_else(
-                        |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
-                    );
                 } else {
                     info!(target:get_log_target(), "Change for server '{}', not this server. Skipping system action.", cloud_provider);
                 }
@@ -187,90 +166,30 @@ async fn process_diff(
                 delete_user(&username).unwrap_or_else(|e| {
                     error!(target:get_log_target(), "Failed to delete user: {}", e);
                 });
-                update_local_cache(
-                    config,
-                    &project,
-                    &cloud_provider,
-                    &hash1,
-                    &status,
-                    &username,
-                )
-                .unwrap_or_else(
-                    |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
-                );
             }
             DiffAction::ModifiedUser => {
-                let projects = get_users_projects(config, &hash2).await?;
-                //delete groups for old user
-                for del_project in &projects {
-                    update_local_cache(
-                        config,
-                        del_project,
-                        &cloud_provider,
-                        &hash1,
-                        &DiffAction::DeletedGroup,
-                        &username,
-                    )
-                    .unwrap_or_else(
-                        |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
-                    );
-                }
-                //delete old user
-                update_local_cache(
-                    config,
-                    &project,
-                    &cloud_provider,
-                    &hash1,
-                    &DiffAction::DeletedUser,
-                    &username,
-                )
-                .unwrap_or_else(
-                    |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
-                );
-                //add new user
-                update_local_cache(
-                    config,
-                    &project,
-                    &cloud_provider,
-                    &hash2,
-                    &DiffAction::AddedUser,
-                    &username,
-                )
-                .unwrap_or_else(
-                    |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
-                );
-                //add groups for new user
-                for add_project in &projects {
-                    update_local_cache(
-                        config,
-                        add_project,
-                        &cloud_provider,
-                        &hash1,
-                        &DiffAction::AddedGroup,
-                        &username,
-                    )
-                    .unwrap_or_else(
-                        |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
-                    );
-                }
+                info!(target: get_log_target(), "Key modified for user {}", username);
+                hasModifiedUser = true;
             }
             DiffAction::AddedUser => {
                 info!(target: get_log_target(), "New key added for user {}", username);
-                update_local_cache(
-                    config,
-                    &project,
-                    &cloud_provider,
-                    &hash1,
-                    &status,
-                    &username,
-                )
-                .unwrap_or_else(
-                    |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
-                );
             }
         }
+        update_local_cache(
+            config,
+            &project,
+            &cloud_provider,
+            &hash1,
+            &status,
+            &username,
+        )
+        .unwrap_or_else(|e| warn!(target:get_log_target(), "Failed to update cache: {}", e));
     }
 
+    if hasModifiedUser {
+        //TODO: optimise
+        sync_full_cache(config).await?;
+    }
     Ok(())
 }
 pub async fn fetch_recent_commit(
