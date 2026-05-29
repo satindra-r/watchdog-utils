@@ -34,7 +34,7 @@ pub async fn process_full_update_request(
 
     match fetch_latest_commit(base_url, token).await {
         Ok(latest_commit) => {
-            fs::write("base_commit.txt", &latest_commit)?;
+            fs::write("/opt/watchdog/bin/base_commit.txt", &latest_commit)?;
         }
         Err(e) => {
             warn!(target:get_log_target(), "Failed to fetch latest commit: {}. Using cache for updates.", e);
@@ -59,7 +59,7 @@ pub async fn process_update_request(
 
     let last_commit;
 
-    if !Path::new("base_commit.txt").exists() {
+    if !Path::new("/opt/watchdog/bin/base_commit.txt").exists() {
         error!(target:get_log_target(), "Last commit not found.");
         return if allow_fallback {
             process_full_update_request(config, update_log_target).await
@@ -70,7 +70,7 @@ pub async fn process_update_request(
             )))
         };
     } else {
-        last_commit = fs::read_to_string("base_commit.txt")?;
+        last_commit = fs::read_to_string("/opt/watchdog/bin/base_commit.txt")?;
         if last_commit.trim().is_empty() {
             error!(target:get_log_target(), "Last commit is empty.");
             return if allow_fallback {
@@ -90,7 +90,7 @@ pub async fn process_update_request(
             Ok(diff) => {
                 info!(target:get_log_target(), "Fetched diff from GitHub");
                 process_diff(&diff, hostname, &config, &last_commit, &merge_commit).await?;
-                fs::write("base_commit.txt", &merge_commit)?;
+                fs::write("/opt/watchdog/bin/base_commit.txt", &merge_commit)?;
             }
             Err(e) => {
                 warn!(target:get_log_target(), "Failed to fetch diff: {}. Updating from cache.", e);
