@@ -15,7 +15,6 @@ pub struct Config {
     pub hostname: String,
     pub keyhouse: KeyhouseConf,
     pub cache_path: PathBuf, // Recieved from main watchdog
-    pub branch: String,
 }
 
 impl Config {
@@ -34,7 +33,6 @@ impl Config {
             hostname,
             keyhouse,
             cache_path,
-            branch: "build".to_string(),
         }
     }
 }
@@ -55,4 +53,18 @@ pub fn init(config: &Config) -> Result<()> {
     }
     fs::create_dir_all(path)?;
     Ok(())
+}
+
+pub fn test_init(cache: &str) -> Config {
+    dotenvy::dotenv().ok();
+    let test_keyhouse = KeyhouseConf {
+        base_url: "https://api.github.com/repos/sdslabs/watchdog-utils".to_string(),
+        token: std::env::var("TOKEN").expect("token not found in .env"),
+    };
+
+    Config {
+        hostname: "centos".to_string(),
+        keyhouse: test_keyhouse,
+        cache_path: PathBuf::from(cache),
+    }
 }

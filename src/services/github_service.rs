@@ -4,7 +4,9 @@ use crate::services::user_service::add_user_to_group;
 use crate::services::user_service::delete_user;
 use crate::services::user_service::remove_user_from_group;
 use crate::utils::cache_utils::{names_path, sync_full_cache, update_local_cache};
+use crate::utils::types::{DiffAction, DiffTypes};
 use anyhow::{Result, anyhow};
+use base64::{Engine as _, engine::general_purpose};
 use log::{error, info, warn};
 use regex::Regex;
 use reqwest::Client;
@@ -112,77 +114,98 @@ async fn process_diff(
     last_commit: &str,
     _merge_commit: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for (cloud_provider, project, hash, status) in extract_diff_parts(diff) {
-        info!(target:get_log_target(),
-            "Parsed diff - Project: {}, Cloud Provider: {}, Hash: {}, Status: {}",
-            project, cloud_provider, hash, status
-        );
+    let mut hasModifiedUser = false;
+    let mut diff_parts = extract_diff_parts(diff);
+    diff_parts.sort_unstable_by(|a, b| a.4.cmp(&b.4));
 
-        let mut content_for_cache: Option<String> = None;
-        let mut username_for_action: Option<String> = None;
-        if let Some(decoded_str) = fetch_and_decode_file(
+    let mut modified_hashes: HashMap<String, String> = HashMap::new();
+
+    for (cloud_provider, project, hash1, hash2, status) in extract_diff_parts(diff) {
+        info!(target:get_log_target(),
+            "Parsed diff - Cloud Provider: {}, Project: {}, Hash1: {}, Hash2: {}, Status: {:?}",
+            cloud_provider, project, hash1, hash2, status
+        );
+        let mut hash2 = hash2.to_string();
+
+        match status {
+            DiffAction::AddedGroup | DiffAction::AddedUser => {
+                hash2 = modified_hashes.get(&hash2).unwrap_or(&hash2).clone()
+            }
+            _ => {}
+        }
+
+        let username = fetch_and_decode_file(
             &config.keyhouse.base_url,
             &config.keyhouse.token,
-            &hash,
+            &hash2,
             &status,
             last_commit,
         )
-        .await?
-        {
-            info!(target:get_log_target(), "Decoded file for hash {}", hash);
-            username_for_action = Some(decoded_str.clone());
+        .await?;
 
-            if cloud_provider == "names" {
-                content_for_cache = Some(decoded_str);
-            } else {
-                content_for_cache = Some("1".to_string());
-            }
-        }
+        info!(target:get_log_target(), "Decoded file for hash {}", hash1);
 
-        if let Some(username) = username_for_action {
-            if cloud_provider == hostname || status == "deleteduser" {
-                if status == "added" && cloud_provider != "names" {
+        match status {
+            DiffAction::AddedGroup => {
+                if cloud_provider == hostname {
                     info!(target:get_log_target(), "Adding user '{}' to group '{}'...", username, project);
                     add_user_to_group(&username, &project).unwrap_or_else(|e| {
                         error!(target:get_log_target(), "Failed to add user: {}", e);
                     });
-                } else if status == "deleted" && cloud_provider != "names" {
+                } else {
+                    info!(target:get_log_target(), "Change for server '{}', not this server. Skipping system action.", cloud_provider);
+                }
+            }
+            DiffAction::DeletedGroup => {
+                if cloud_provider == hostname {
                     info!(target:get_log_target(), "Removing user '{}' from group '{}'...", username, project);
                     remove_user_from_group(&username, &project).unwrap_or_else(|e| {
                         error!(target:get_log_target(), "Failed to remove user: {}", e);
                     });
-                } else if status == "deleteduser" {
-                    info!(target:get_log_target(), "Deleting user '{}'...", username);
-                    delete_user(&username).unwrap_or_else(|e| {
-                        error!(target:get_log_target(), "Failed to delete user: {}", e);
-                    });
+
+                    let projects = get_users_projects(config, &hash1).await?;
+                    if projects.is_empty() {
+                        info!(target:get_log_target(), "No other projects, deleting user '{}'...", username);
+                        delete_user(&username).unwrap_or_else(|e| {
+                            error!(target:get_log_target(), "Failed to delete user: {}", e);
+                        });
+                    }
+                } else {
+                    info!(target:get_log_target(), "Change for server '{}', not this server. Skipping system action.", cloud_provider);
                 }
-            } else if cloud_provider != "names" {
-                info!(target:get_log_target(), "Change for server '{}', not this server. Skipping system action.", cloud_provider);
             }
-
-            let (cache_provider, cache_project) = if cloud_provider == "names" {
-                ("names", "")
-            } else {
-                (cloud_provider.as_str(), project.as_str())
-            };
-
-            if let Some(content) = content_for_cache {
-                update_local_cache(
-                    config,
-                    cache_project,
-                    cache_provider,
-                    &hash,
-                    &status,
-                    &content,
-                )
-                .unwrap_or_else(
-                    |e| warn!(target:get_log_target(), "Failed to update cache: {}", e),
-                );
+            DiffAction::DeletedUser => {
+                info!(target:get_log_target(), "Deleting user '{}'...", username);
+                delete_user(&username).unwrap_or_else(|e| {
+                    error!(target:get_log_target(), "Failed to delete user: {}", e);
+                });
             }
+            DiffAction::ModifiedUser => {
+                hasModifiedUser = true;
+                modified_hashes.insert(hash1.to_string(), hash2.to_string());
+                info!(target: get_log_target(), "Key modified for user {}", username);
+            }
+            DiffAction::AddedUser => {
+                info!(target: get_log_target(), "New key added for user {}", username);
+            }
+        }
+        if !hasModifiedUser {
+            update_local_cache(
+                config,
+                &project,
+                &cloud_provider,
+                &hash1,
+                &status,
+                &username,
+            )
+            .unwrap_or_else(|e| warn!(target:get_log_target(), "Failed to update cache: {}", e));
         }
     }
 
+    if hasModifiedUser {
+        //TODO: optimise
+        sync_full_cache(config).await?;
+    }
     Ok(())
 }
 pub async fn fetch_recent_commit(
@@ -195,7 +218,7 @@ pub async fn fetch_recent_commit(
     let commits: Vec<CommitInfo> = client
         .get(&url)
         .bearer_auth(token)
-        .header(USER_AGENT, "rust-webhook-server")
+        .header(USER_AGENT, "Watchdog Utils")
         .header(ACCEPT, "application/vnd.github.v3+json")
         .send()
         .await?
@@ -209,18 +232,17 @@ pub async fn fetch_recent_commit(
         Err("No commits found".into())
     }
 }
-use base64::{Engine as _, engine::general_purpose};
+
 pub async fn fetch_and_decode_file(
     base_url: &str,
     token: &str,
     hash: &str,
-    status: &str,
+    status: &DiffAction,
     base_commit: &str,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let commit_ref = if status == "deleted" || status == "deleteduser" {
-        base_commit
-    } else {
-        "build"
+) -> Result<String, Box<dyn std::error::Error>> {
+    let commit_ref = match status {
+        DiffAction::DeletedGroup | DiffAction::DeletedUser => base_commit,
+        _ => "build",
     };
 
     let url = format!("{}/contents/names/{}?ref={}", base_url, hash, commit_ref);
@@ -228,7 +250,7 @@ pub async fn fetch_and_decode_file(
     let file_resp = client
         .get(&url)
         .bearer_auth(token)
-        .header(USER_AGENT, "rust-webhook-server")
+        .header(USER_AGENT, "Watchdog Utils")
         .header(ACCEPT, "application/vnd.github.v3+json")
         .send()
         .await?;
@@ -238,7 +260,10 @@ pub async fn fetch_and_decode_file(
             url,
             file_resp.status()
         );
-        return Ok(None);
+        return Err(Box::new(io::Error::new(
+            io::ErrorKind::HostUnreachable,
+            "GitHub API returned error",
+        )));
     }
     let file_json = file_resp.json::<serde_json::Value>().await?;
     if let Some(base64_content) = file_json["content"].as_str() {
@@ -246,53 +271,126 @@ pub async fn fetch_and_decode_file(
         let decoded = general_purpose::STANDARD.decode(&clean_base64)?;
         let decoded_str = String::from_utf8(decoded)?;
         info!(target:get_log_target(), "Decoded file for hash {}", hash);
-        Ok(Some(decoded_str))
+        Ok(decoded_str)
     } else {
         warn!(target:get_log_target(), "No 'content' field found for file hash {}", hash);
-        Ok(None)
+        Err(Box::new(io::Error::new(
+            io::ErrorKind::NotFound,
+            "No 'content' field found",
+        )))
     }
 }
-pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, String)> {
-    let re_access = Regex::new(r"diff --git a/(access/([^/]+)/([^/]+)/([\w\d]+))").unwrap();
-    let re_names = Regex::new(r"diff --git a/(names/([\w\d]+))").unwrap();
+pub fn extract_diff_parts(diff_data: &str) -> Vec<(String, String, String, String, DiffAction)> {
+    let re_access = Regex::new(
+        r"diff --git a/access/([^/]+)/([^/]+)/([\w\d]+) b/access/([^/]+)/([^/]+)/([\w\d]+)",
+    )
+    .unwrap();
+    let re_names = Regex::new(r"diff --git a/names/([\w\d]+) b/names/([\w\d]+)").unwrap();
     let mut parts_with_status = HashMap::new();
-    for line in diff_data.lines() {
+    let mut diff_data_lines = diff_data.lines().peekable();
+    while let Some(line) = diff_data_lines.next() {
+        let next_line = diff_data_lines.peek().unwrap_or(&"");
         if let Some(caps) = re_access.captures(line) {
-            let full_path = &caps[1];
-            let project = &caps[2];
-            let provider = &caps[3];
-            let hash = &caps[4];
-            let status = if diff_data.contains("new file mode") && line.contains(full_path) {
-                "added"
-            } else if diff_data.contains("deleted file mode") && line.contains(full_path) {
-                "deleted"
-            } else {
-                "modified"
-            };
-            info!(target:get_log_target(),
-                "Access file change detected: {}/{}/{}, status: {}",
-                project, provider, hash, status
-            );
-            parts_with_status
-                .entry((project.to_string(), provider.to_string(), hash.to_string()))
-                .or_insert(status.to_string());
+            let provider1 = &caps[1];
+            let project1 = &caps[2];
+            let hash1 = &caps[3];
+            let provider2 = &caps[4];
+            let project2 = &caps[5];
+            let hash2 = &caps[6];
+
+            if next_line.contains(format!("{}", DiffTypes::Added).as_str()) {
+                parts_with_status
+                    .entry((
+                        provider1.to_string(),
+                        project1.to_string(),
+                        hash1.to_string(),
+                        hash1.to_string(),
+                    ))
+                    .or_insert(DiffAction::AddedGroup);
+                info!(target:get_log_target(),
+                    "Access file change detected: {}/{}/{}, status: {:?}",
+                    provider1, project1, hash1, DiffAction::AddedGroup
+                );
+            } else if next_line.contains(format!("{}", DiffTypes::Deleted).as_str()) {
+                parts_with_status
+                    .entry((
+                        provider1.to_string(),
+                        project1.to_string(),
+                        hash1.to_string(),
+                        hash1.to_string(),
+                    ))
+                    .or_insert(DiffAction::DeletedGroup);
+                info!(target:get_log_target(),
+                    "Access file change detected: {}/{}/{}, status: {:?}",
+                    provider1, project1, hash1, DiffAction::DeletedGroup
+                );
+            } else if next_line.contains(format!("{}", DiffTypes::Renamed).as_str()) {
+                parts_with_status
+                    .entry((
+                        provider1.to_string(),
+                        project1.to_string(),
+                        hash1.to_string(),
+                        hash1.to_string(),
+                    ))
+                    .or_insert(DiffAction::DeletedGroup);
+                parts_with_status
+                    .entry((
+                        provider2.to_string(),
+                        project2.to_string(),
+                        hash2.to_string(),
+                        hash2.to_string(),
+                    ))
+                    .or_insert(DiffAction::AddedGroup);
+                info!(target:get_log_target(),
+                    "Access file change detected: {}/{}/{}, status: {:?}",
+                    provider1, project1, hash1, DiffAction::DeletedGroup
+                );
+                info!(target:get_log_target(),
+                    "Access file change detected: {}/{}/{}, status: {:?}",
+                    provider2, project2, hash2, DiffAction::AddedGroup
+                );
+            }
         } else if let Some(caps) = re_names.captures(line) {
-            let full_path = &caps[1];
-            let hash = &caps[2];
-            let status = if diff_data.contains("deleted file mode") && line.contains(full_path) {
-                "deleteduser"
+            let hash1 = &caps[1];
+            let hash2 = &caps[2];
+            if next_line.contains(format!("{}", DiffTypes::Added).as_str()) {
+                parts_with_status
+                    .entry((
+                        "".to_string(),
+                        "".to_string(),
+                        hash1.to_string(),
+                        hash1.to_string(),
+                    ))
+                    .or_insert(DiffAction::AddedUser);
+                info!(target:get_log_target(), "Name file change detected: {}, status: {:?}", hash1,DiffAction::AddedUser);
+            } else if next_line.contains(format!("{}", DiffTypes::Deleted).as_str()) {
+                parts_with_status
+                    .entry((
+                        "".to_string(),
+                        "".to_string(),
+                        hash1.to_string(),
+                        hash1.to_string(),
+                    ))
+                    .or_insert(DiffAction::DeletedUser);
+                info!(target:get_log_target(), "Name file change detected: {}, status: {:?}", hash1, DiffAction::DeletedUser);
+            } else if next_line.contains(format!("{}", DiffTypes::Renamed).as_str()) {
+                parts_with_status
+                    .entry((
+                        "".to_string(),
+                        "".to_string(),
+                        hash1.to_string(),
+                        hash2.to_string(),
+                    ))
+                    .or_insert(DiffAction::ModifiedUser);
+                info!(target:get_log_target(), "Name file change detected: {} to {}, status: {:?}", hash1,hash2, DiffAction::ModifiedUser);
             } else {
-                "modifieduser"
+                info!(target:get_log_target(), "Unknown diff");
             };
-            info!(target:get_log_target(), "Name file change detected: {}, status: {}", hash, status);
-            parts_with_status
-                .entry(("".to_string(), "names".to_string(), hash.to_string()))
-                .or_insert(status.to_string());
         }
     }
     parts_with_status
         .into_iter()
-        .map(|((proj, prov, hash), status)| (proj, prov, hash, status))
+        .map(|((proj, prov, hash1, hash2), status)| (proj, prov, hash1, hash2, status))
         .collect()
 }
 pub async fn fetch_diff(
@@ -307,7 +405,7 @@ pub async fn fetch_diff(
     info!(target:get_log_target(), "Fetching diff from GitHub: {}", url);
     let response = client
         .get(&url)
-        .header(USER_AGENT, "rust-webhook-server")
+        .header(USER_AGENT, "Watchdog Utils")
         .header(ACCEPT, "application/vnd.github.v3.diff")
         .bearer_auth(token)
         .send()
@@ -358,8 +456,8 @@ pub async fn update_all_users_from_cache(
 
                                 // 4. Execute Provisioning
                                 add_user_to_group(trimmed_username, group_name).unwrap_or_else(
-                                        |e| error!(target:get_log_target(), "Failed to add user during sync: {}", e),
-                                    );
+                                    |e| error!(target:get_log_target(), "Failed to add user during sync: {}", e),
+                                );
                             }
                         }
                     }
@@ -394,5 +492,364 @@ pub async fn fetch_latest_commit(base_url: &str, token: &str) -> Result<String> 
         Ok(sha.to_string())
     } else {
         Err(anyhow!("SHA not found in commit response"))
+    }
+}
+
+pub async fn get_users_projects(
+    config: &Config,
+    userhash: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+
+    let host_url = format!(
+        "{}/contents/access/{}?ref=build",
+        config.keyhouse.base_url, config.hostname
+    );
+    info!(target:get_log_target(), "Host URL: {}", host_url);
+
+    let projects: Vec<String> = match client
+        .get(&host_url)
+        .header(USER_AGENT, "Watchdog Utils")
+        .bearer_auth(&config.keyhouse.token)
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => {
+            let contents: Vec<Value> = r.json().await?;
+            info!(target:get_log_target(), "Response: {:?}",contents);
+            contents
+                .into_iter()
+                .filter_map(|item| item["name"].as_str().map(String::from))
+                .collect()
+        }
+        Ok(r) => {
+            info!(target:get_log_target(), "Failed to fetch names: {}", r.status());
+            return Err(format!("HTTP error: {}", r.status()).into());
+        }
+        Err(e) => {
+            info!(target:get_log_target(), "Error fetching names: {:?}", e);
+            return Err(e.into());
+        }
+    };
+
+    info!(target:get_log_target(), "Found projects: {:?} for host {}", projects, config.hostname);
+    let mut user_projects: Vec<String> = Vec::new();
+    for project in &projects {
+        let project_url = format!(
+            "{}/contents/access/{}/{}/{}?ref=build",
+            config.keyhouse.base_url, config.hostname, project, userhash
+        );
+
+        match client
+            .get(&project_url)
+            .header(USER_AGENT, "Watchdog Utils")
+            .bearer_auth(&config.keyhouse.token)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => user_projects.push(project.clone()),
+            Ok(_) | Err(_) => continue,
+        }
+    }
+    Ok(user_projects)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::test_init;
+    use crate::services::github_service;
+    use crate::utils::types::DiffAction;
+    use std::collections::HashSet;
+    /*
+        use this to get diffs from Github
+        #[test]
+        fn fetch_data_test() {
+            let config = test_init("");
+            let client = Client::new();
+            let clean_base = "https://api.github.com/repos/watchdog-test-org/test";
+            let base = "14dc1a625a40dd1effc5e3aa96d5b899efa40a35";
+            let merge = "715a387763b7565f2215f70cea02cbd35ed8a2bd";
+            let url = format!("{}/compare/{}...{}", clean_base, base, merge);
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let response = client
+                    .get(&url)
+                    .header(USER_AGENT, "Watchdog Utils")
+                    .header(ACCEPT, "application/vnd.github.v3.diff")
+                    .bearer_auth(config.keyhouse.token.as_str())
+                    .send()
+                    .await
+                    .unwrap();
+                let diff = response.text().await.unwrap();
+                println!(">{}<", diff);
+            });
+        }
+    */
+    #[test]
+    fn extract_diff_parts_add_grp_test() {
+        let diff = r#"diff --git a/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef b/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+new file mode 100644
+index 0000000..56a6051
+--- /dev/null
++++ b/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+@@ -0,0 +1 @@
++1
+\ No newline at end of file
+"#;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected = (
+                "centos".to_string(),
+                "proxy".to_string(),
+                "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
+                "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
+                DiffAction::AddedGroup,
+            );
+            let result = github_service::extract_diff_parts(diff);
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0], expected);
+        });
+    }
+
+    #[test]
+    fn extract_diff_parts_del_grp_test() {
+        let diff = r#"diff --git a/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef b/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+deleted file mode 100644
+index 56a6051..0000000
+--- a/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
++++ /dev/null
+@@ -1 +0,0 @@
+-1
+\ No newline at end of file
+"#;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected = (
+                "centos".to_string(),
+                "proxy".to_string(),
+                "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
+                "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef".to_string(),
+                DiffAction::DeletedGroup,
+            );
+            let result = github_service::extract_diff_parts(diff);
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0], expected);
+        });
+    }
+
+    #[test]
+    fn extract_diff_parts_multi_add_grp_test() {
+        let diff = r#"diff --git a/access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef b/access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+new file mode 100644
+index 0000000..56a6051
+--- /dev/null
++++ b/access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+@@ -0,0 +1 @@
++1
+\ No newline at end of file
+diff --git a/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef b/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+new file mode 100644
+index 0000000..56a6051
+--- /dev/null
++++ b/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+@@ -0,0 +1 @@
++1
+\ No newline at end of file
+"#;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected: HashSet<(String, String, String, String, DiffAction)> =
+                HashSet::from_iter([
+                    (
+                        "centos".to_string(),
+                        "proxy".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        DiffAction::AddedGroup,
+                    ),
+                    (
+                        "centos".to_string(),
+                        "broker".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        DiffAction::AddedGroup,
+                    ),
+                ]);
+            let result = github_service::extract_diff_parts(diff);
+            let result_set = HashSet::from_iter(result);
+            assert_eq!(result_set, expected);
+        });
+    }
+    #[test]
+    fn extract_diff_parts_multi_del_grp_test() {
+        let diff = r#"diff --git a/access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef b/access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+deleted file mode 100644
+index 56a6051..0000000
+--- a/access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
++++ /dev/null
+@@ -1 +0,0 @@
+-1
+\ No newline at end of file
+diff --git a/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef b/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+deleted file mode 100644
+index 56a6051..0000000
+--- a/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
++++ /dev/null
+@@ -1 +0,0 @@
+-1
+\ No newline at end of file
+"#;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected: HashSet<(String, String, String, String, DiffAction)> =
+                HashSet::from_iter([
+                    (
+                        "centos".to_string(),
+                        "proxy".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        DiffAction::DeletedGroup,
+                    ),
+                    (
+                        "centos".to_string(),
+                        "broker".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        DiffAction::DeletedGroup,
+                    ),
+                ]);
+            let result = github_service::extract_diff_parts(diff);
+            let result_set = HashSet::from_iter(result);
+            assert_eq!(result_set, expected);
+        });
+    }
+
+    #[test]
+    fn extract_diff_parts_add_del_grp_test() {
+        let diff = r#"diff --git a/access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef b/access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+similarity index 100%
+rename from access/centos/proxy/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+rename to access/centos/broker/6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef
+"#;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected: HashSet<(String, String, String, String, DiffAction)> =
+                HashSet::from_iter([
+                    (
+                        "centos".to_string(),
+                        "proxy".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        DiffAction::DeletedGroup,
+                    ),
+                    (
+                        "centos".to_string(),
+                        "broker".to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef"
+                            .to_string(),
+                        DiffAction::AddedGroup,
+                    ),
+                ]);
+            let result = github_service::extract_diff_parts(diff);
+            let result_set = HashSet::from_iter(result);
+            assert_eq!(result_set, expected);
+        });
+    }
+
+    #[test]
+    fn extract_diff_parts_add_user_test() {
+        let diff = r#"diff --git a/names/8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0 b/names/8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0
+new file mode 100644
+index 0000000..b6955e2
+--- /dev/null
++++ b/names/8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0
+@@ -0,0 +1 @@
++uranus
+\ No newline at end of file
+"#;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected = (
+                "".to_string(),
+                "".to_string(),
+                "8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0".to_string(),
+                "8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0".to_string(),
+                DiffAction::AddedUser,
+            );
+            let result = github_service::extract_diff_parts(diff);
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0], expected);
+        });
+    }
+
+    #[test]
+    fn extract_diff_parts_del_user_test() {
+        let diff = r#"diff --git a/names/8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0 b/names/8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0
+deleted file mode 100644
+index b6955e2..0000000
+--- a/names/8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0
++++ /dev/null
+@@ -1 +0,0 @@
+-uranus
+\ No newline at end of file"#;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected = (
+                "".to_string(),
+                "".to_string(),
+                "8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0".to_string(),
+                "8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0".to_string(),
+                DiffAction::DeletedUser,
+            );
+            let result = github_service::extract_diff_parts(diff);
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0], expected);
+        });
+    }
+
+    #[test]
+    fn get_users_projects_test() {
+        let config = test_init("");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected = "centos".to_string();
+            let result = github_service::get_users_projects(
+                &config,
+                "8151cfbed99dd9e208eaf3d83e7586eb52d192d4bfbf671a4ca51641eac38df0",
+            )
+            .await
+            .expect("Github request failed");
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0], expected);
+        });
+    }
+    #[test]
+    fn get_users_multi_projects_test() {
+        let config = test_init("");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let expected: HashSet<String> =
+                HashSet::from_iter(["centos".to_string(), "sudo".to_string()]);
+            let result = github_service::get_users_projects(
+                &config,
+                "6807cfc9f4a951d37cb9097bcc2e5081dad331243b00501d3e9d87423d58f6ef",
+            )
+            .await
+            .expect("Github request failed");
+            let result_set = HashSet::from_iter(result);
+            assert_eq!(result_set, expected);
+        });
     }
 }

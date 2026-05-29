@@ -37,7 +37,22 @@ jobs:
         run: cargo build --verbose
 
       - name: Run Tests
+        env:
+          TOKEN: ${{ secrets.TOKEN_GITHUB }}
         run: cargo test --verbose
+
+  docker_tests:
+    name: Docker Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t user-tests .
+
+      - name: Run tests in container
+        run: docker run --rm user-tests cargo test docker --verbose -- --include-ignored
 
   udeps:
     name: Unused Dependencies (cargo-udeps)

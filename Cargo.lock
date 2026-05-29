@@ -121,6 +121,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
 name = "encoding_rs"
 version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1361,15 +1367,17 @@ dependencies = [
 
 [[package]]
 name = "watchdog_utils_II"
-version = "0.5.5"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64",
+ "dotenvy",
  "log",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
